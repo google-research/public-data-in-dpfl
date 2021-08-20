@@ -126,8 +126,8 @@ experiment type name and add this to options in FLAGS list 2. Add an if
 statement to main in run_dpfl.py to account for new method. 3. Create another
 train_and_eval_<method_name> function to manage all the logic. 4. Create a data
 processing function similar to '_preprocess_data' 5. Create an iterative process
-+ model builder function similar to _build_custom_model_and_process 6. Create a
-<method_name>_loop.py file to manage the training loop 7. Create a
+and model builder function similar to _build_custom_model_and_process 6. Create
+a <method_name>_loop.py file to manage the training loop 7. Create a
 <method_name>.py file to manage the algorithm logic
 
 Not an official Google product.
