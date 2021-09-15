@@ -30,14 +30,10 @@ import sys
 
 import language_models as models
 import metrics
-import stackoverflow_input_mapper
 import data_word_prediction as nwp_dataset
-import private_public_fedavg
 import scaffold_v2
 import mime
 import mimelite
-import public
-import public_loop
 import alternating_loop
 import warmstart_loop
 import scaffold_loop
@@ -46,11 +42,11 @@ import mimelite_loop
 import mirror_descent
 import mirror_descent_loop
 
-from federated_research.dp_ftrl import dp_fedavg
-from federated_research.dp_ftrl import optimizer_utils
-from federated_research.dp_ftrl import training_loop
-from federated_research.utils import keras_metrics
-from federated_research.utils.datasets import stackoverflow_word_prediction as stackoverflow_dataset
+from dp_ftrl import dp_fedavg
+from dp_ftrl import optimizer_utils
+from dp_ftrl import training_loop
+from utils import keras_metrics
+from utils.datasets import stackoverflow_word_prediction as stackoverflow_dataset
 
 
 
@@ -229,7 +225,7 @@ def _preprocess_data(data_name, vocab_size, num_oov_buckets, sequence_length,
         # dataset='stackoverflow')
   elif data_name == 'stackoverflow_private':
     train_clientdata, _, test_clientdata = (
-        tff.simulation.datasets.stackoverflow.load_data())
+        tff.simulation.datasets.stackoverflow.load_data(cache_dir='./data/'))
     dataset_vocab = nwp_dataset.create_vocab(vocab_size)
 
     base_test_dataset = test_clientdata.create_tf_dataset_from_all_clients()
@@ -336,7 +332,7 @@ def _preprocess_scaffold_data(vocab_size, num_oov_buckets, sequence_length,
         tff.simulation.datasets.stackoverflow.load_data())
       dataset_vocab = nwp_dataset.create_vocab(vocab_size)
 
-       train_dataset_preprocess_comp_public = nwp_dataset.create_preprocess_fn(
+      train_dataset_preprocess_comp_public = nwp_dataset.create_preprocess_fn(
           vocab=dataset_vocab,
           num_oov_buckets=num_oov_buckets,
           client_batch_size=client_batch_size,
@@ -398,9 +394,10 @@ def _preprocess_mime_data(vocab_size, num_oov_buckets, sequence_length,
     if FLAGS.experiment_type == 'mime_SO' or FLAGS.experiment_type == 'mime_warmstart_SO':
       _, train_clientdata_public, _ = (
         tff.simulation.datasets.stackoverflow.load_data())
-       dataset_vocab = nwp_dataset.create_vocab(vocab_size)
+      
+      dataset_vocab = nwp_dataset.create_vocab(vocab_size)
 
-       train_dataset_preprocess_comp_public = nwp_dataset.create_preprocess_fn(
+      train_dataset_preprocess_comp_public = nwp_dataset.create_preprocess_fn(
           vocab=dataset_vocab,
           num_oov_buckets=num_oov_buckets,
           client_batch_size=client_batch_size,
@@ -619,12 +616,6 @@ def _build_custom_model_and_process(input_spec, test_metrics,
         dp_clip_norm=FLAGS.clip_norm,
         server_optimizer_fn=server_optimizer_fn,
         client_optimizer_fn=client_optimizer_fn)
-  elif update_type == 'average':
-    iterative_process = private_public_fedavg.build_public_federated_averaging_process(
-        tff_model_fn,
-        dp_clip_norm=FLAGS.clip_norm,
-        server_optimizer_fn=server_optimizer_fn,
-        client_optimizer_fn=client_optimizer_fn)
   else:
     raise ValueError("Unknown update_type %s".format(update_type))
 
@@ -818,43 +809,43 @@ def _build_mirror_descent_model_and_process(input_spec, test_metrics, server_opt
       FLAGS.server_optimizer, tff_model_fn, server_optimizer_fn)
   return iterative_process, evaluate_fn, server_state_update_fn
 
-def _build_stackoverflow_SGD_process(input_spec, test_metrics):
-  """Build Keras opt checkpoint iterative process."""
+# def _build_stackoverflow_SGD_process(input_spec, test_metrics):
+#   """Build Keras opt checkpoint iterative process."""
 
-  def tff_model_fn():
-    keras_model = models.create_recurrent_model(
-        vocab_size=FLAGS.vocab_size,
-        embedding_size=FLAGS.embedding_size,
-        latent_size=FLAGS.latent_size,
-        num_layers=FLAGS.num_layers,
-        shared_embedding=FLAGS.shared_embedding,
-        cell_type=FLAGS.lstm_cell)
-    loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
-    return dp_fedavg.KerasModelWrapper(keras_model, input_spec, loss)
+#   def tff_model_fn():
+#     keras_model = models.create_recurrent_model(
+#         vocab_size=FLAGS.vocab_size,
+#         embedding_size=FLAGS.embedding_size,
+#         latent_size=FLAGS.latent_size,
+#         num_layers=FLAGS.num_layers,
+#         shared_embedding=FLAGS.shared_embedding,
+#         cell_type=FLAGS.lstm_cell)
+#     loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+#     return dp_fedavg.KerasModelWrapper(keras_model, input_spec, loss)
 
-  server_optimizer_fn = tf.keras.optimizers.SGD
-  client_optimizer_fn = tf.keras.optimizers.SGD
-  iterative_process = public.build_federated_averaging_process(
-        tff_model_fn,
-        dp_clip_norm=FLAGS.clip_norm,
-        server_optimizer_fn=server_optimizer_fn,
-        client_optimizer_fn=client_optimizer_fn,
-        server_learning_rate=FLAGS.server_lr,
-        server_momentum=FLAGS.server_momentum,
-        client_learning_rate=FLAGS.client_lr,
-        dp_noise_std=0.0)
+#   server_optimizer_fn = tf.keras.optimizers.SGD
+#   client_optimizer_fn = tf.keras.optimizers.SGD
+#   iterative_process = public.build_federated_averaging_process(
+#         tff_model_fn,
+#         dp_clip_norm=FLAGS.clip_norm,
+#         server_optimizer_fn=server_optimizer_fn,
+#         client_optimizer_fn=client_optimizer_fn,
+#         server_learning_rate=FLAGS.server_lr,
+#         server_momentum=FLAGS.server_momentum,
+#         client_learning_rate=FLAGS.client_lr,
+#         dp_noise_std=0.0)
 
-  model = tff_model_fn()
+#   model = tff_model_fn()
 
-  def evaluate_fn(model_weights, dataset):
-    model.from_weights(model_weights)
-    metrics = dp_fedavg.keras_evaluate(model.keras_model, dataset, test_metrics)
-    return collections.OrderedDict(
-        (metric.name, metric.result().numpy()) for metric in metrics)
+#   def evaluate_fn(model_weights, dataset):
+#     model.from_weights(model_weights)
+#     metrics = dp_fedavg.keras_evaluate(model.keras_model, dataset, test_metrics)
+#     return collections.OrderedDict(
+#         (metric.name, metric.result().numpy()) for metric in metrics)
 
-  server_state_update_fn = _build_server_state_epoch_update_fn(
-      FLAGS.server_optimizer, tff_model_fn, server_optimizer_fn)
-  return iterative_process, evaluate_fn, server_state_update_fn
+#   server_state_update_fn = _build_server_state_epoch_update_fn(
+#       FLAGS.server_optimizer, tff_model_fn, server_optimizer_fn)
+#   return iterative_process, evaluate_fn, server_state_update_fn
 
 def _build_tff_learning_model_and_process(input_spec, test_metrics,
                                           server_optimizer: str = 'sgd'):
@@ -1482,22 +1473,6 @@ def train_and_eval():
         rounds_per_checkpoint=FLAGS.rounds_per_checkpoint,
         rounds_per_train_eval=2000,
         server_state_epoch_update_fn=server_state_update_fn)
-  else:
-    public_loop.run(
-        iterative_process,
-        client_dataset_ids_fn,
-        validation_fn=functools.partial(evaluate_fn, dataset=validation_set),
-        total_epochs=total_epochs,
-        total_rounds=FLAGS.total_rounds,
-        experiment_name=FLAGS.experiment_name,
-        train_eval_fn=None,
-        test_fn=functools.partial(evaluate_fn, dataset=test_set),
-        root_output_dir=FLAGS.root_output_dir,
-        hparam_dict=hparam_dict,
-        rounds_per_eval=FLAGS.rounds_per_eval,
-        rounds_per_checkpoint=FLAGS.rounds_per_checkpoint,
-        rounds_per_train_eval=2000,
-        server_state_epoch_update_fn=server_state_update_fn)
 
 def train_and_eval_mirror_descent():
   logging.info('Show FLAGS for debugging:')
@@ -1508,7 +1483,7 @@ def train_and_eval_mirror_descent():
       (name, FLAGS[name].value) for name in HPARAM_FLAGS
   ])
 
-  elif FLAGS.experiment_type == 'mirror_descent_SO' or FLAGS.experiment_type == 'mirror_descent_warmstart_SO':
+  if FLAGS.experiment_type == 'mirror_descent_SO' or FLAGS.experiment_type == 'mirror_descent_warmstart_SO':
      # Train on public SO
     train_dataset_computation_public, train_set_public, _, _ = _preprocess_data(
         'stackoverflow_public', FLAGS.vocab_size, FLAGS.num_oov_buckets,

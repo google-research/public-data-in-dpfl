@@ -21,9 +21,9 @@ from absl import logging
 import tensorflow_federated as tff
 import tensorflow as tf
 
-from federated_research.dp_ftrl import dp_fedavg
-from federated_research.dp_ftrl import training_loop
-from public_data_in_dpfl import scaffold_v2
+from dp_ftrl import dp_fedavg
+from dp_ftrl import training_loop
+import scaffold_v2
 
 
 def run(

@@ -19,8 +19,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from absl import logging
 import tensorflow_federated as tff
 
-from federated_research.dp_ftrl import dp_fedavg
-from federated_research.dp_ftrl import training_loop
+from dp_ftrl import dp_fedavg
+from dp_ftrl import training_loop
 
 
 def run(

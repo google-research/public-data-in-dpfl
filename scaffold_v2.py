@@ -21,8 +21,8 @@ import tensorflow as tf
 import tensorflow_federated as tff
 import tensorflow_privacy as tfp
 
-from federated_research.dp_ftrl import optimizer_utils
-from federated_research.utils import tensor_utils
+from dp_ftrl import optimizer_utils
+from utils import tensor_utils
 
 
 DEFAULT_SERVER_OPTIMIZER_FN = lambda w: optimizer_utils.SGDServerOptimizer(  # pylint: disable=g-long-lambda

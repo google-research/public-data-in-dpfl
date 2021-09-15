@@ -27,9 +27,9 @@ import shutil
 import subprocess
 import tempfile
 
-from federated_research.dp_ftrl import dp_fedavg
-from federated_research.dp_ftrl import training_loop
-from public_data_in_dpfl import mimelite
+from dp_ftrl import dp_fedavg
+from dp_ftrl import training_loop
+import mimelite
 
 def run(
     iterative_process_private: tff.templates.IterativeProcess,

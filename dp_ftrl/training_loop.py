@@ -11,57 +11,87 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Mime training loop."""
+"""Training loops for DP-FTRL."""
 
+import os.path
+import pprint
+import random
 import time
-import attr
-import collections
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from absl import logging
-import tensorflow_federated as tff
 import tensorflow as tf
-import numpy as np
-import os
-import os.path
-import shutil
-import subprocess
-import tempfile
+import tensorflow_federated as tff
 
 from dp_ftrl import dp_fedavg
-from dp_ftrl import training_loop
-import mime
+from utils import utils_impl
+from tensorboard.plugins.hparams import api as hp
 
-@attr.s(eq=False, order=False, frozen=True)
-class LoadingState(object):
-  """Structure for state on the server.
 
-  Attributes:
-    model: A `tff.learning.ModelWeights` instance.
-    optimizer_state: A namedtuple of the optimizer variables.
-    round_num: The current training round, as a float.
-    dp_clip_norm: L2 norm to clip client gradients.
-    dp_noise_std: Standard deviation of Gaussian distribution to sample noise
-     to add to gradients for differential privacy.
-  """
-  model = attr.ib()
-  optimizer_state = attr.ib()
-  round_num = attr.ib()
-  dp_clip_norm= attr.ib()
-  dp_noise_std=attr.ib()
-  # This is a float to avoid type incompatibility when calculating learning rate
-  # schedules.
+def _create_if_not_exists(path):
+  try:
+    tf.io.gfile.makedirs(path)
+  except tf.errors.OpError:
+    logging.info('Skipping creation of directory [%s], already exists', path)
+
+
+def _setup_outputs(root_output_dir: str, experiment_name: str,
+                   hparam_dict: Dict[str, Any]):
+  """Set up directories for experiment loops, write hyperparameters to disk."""
+
+  if not experiment_name:
+    raise ValueError('experiment_name must be specified.')
+
+  _create_if_not_exists(root_output_dir)
+
+  checkpoint_dir = os.path.join(root_output_dir, 'checkpoints', experiment_name)
+  _create_if_not_exists(checkpoint_dir)
+  checkpoint_mngr = tff.simulation.FileCheckpointManager(checkpoint_dir)
+
+  results_dir = os.path.join(root_output_dir, 'results', experiment_name)
+  _create_if_not_exists(results_dir)
+  csv_file = os.path.join(results_dir, 'experiment.metrics.csv')
+  metrics_mngr = tff.simulation.CSVMetricsManager(csv_file)
+
+  summary_logdir = os.path.join(root_output_dir, 'logdir', experiment_name)
+  _create_if_not_exists(summary_logdir)
+  tensorboard_mngr = tff.simulation.TensorBoardManager(summary_logdir)
+
+  if hparam_dict:
+    summary_writer = tf.summary.create_file_writer(summary_logdir)
+    hparam_dict['metrics_file'] = metrics_mngr.metrics_filename
+    hparams_file = os.path.join(results_dir, 'hparams.csv')
+    utils_impl.atomic_write_series_to_csv(hparam_dict, hparams_file)
+    with summary_writer.as_default():
+      hp.hparams({k: v for k, v in hparam_dict.items() if v is not None})
+
+  logging.info('Writing...')
+  logging.info('    checkpoints to: %s', checkpoint_dir)
+  logging.info('    metrics csv to: %s', metrics_mngr.metrics_filename)
+  logging.info('    summaries to: %s', summary_logdir)
+
+  return checkpoint_mngr, metrics_mngr, tensorboard_mngr
+
+
+def _write_metrics(metrics_mngr, tensorboard_mngr, metrics, round_num):
+  """Atomic metrics writer which inlines logic from MetricsHook class."""
+  if not isinstance(metrics, dict):
+    raise TypeError('metrics should be type `dict`.')
+  if not isinstance(round_num, int):
+    raise TypeError('round_num should be type `int`.')
+  logging.info('Metrics at round {:d}:\n{!s}'.format(round_num,
+                                                     pprint.pformat(metrics)))
+  metrics_mngr.save_metrics(metrics, round_num)
+  tensorboard_mngr.save_metrics(metrics, round_num)
+
 
 def run(
-    iterative_process_private: tff.templates.IterativeProcess,
-    iterative_process_public: tff.templates.IterativeProcess,
-    client_datasets_fn_private: Callable[[int, int], Tuple[List, int]],  # pylint: disable=g-bare-generic
-    client_datasets_fn_public: Callable[[int, int], Tuple[List, int]],
+    iterative_process: tff.templates.IterativeProcess,
+    client_datasets_fn: Callable[[int, int], Tuple[List, int]],  # pylint: disable=g-bare-generic
     validation_fn: Callable[[Any], Dict[str, float]],
     total_epochs: int,
     total_rounds: int,
     experiment_name: str,
-    warmstart_file: Optional[str] = '',
     train_eval_fn: Optional[Callable[[Any], Dict[str, float]]] = None,
     test_fn: Optional[Callable[[Any], Dict[str, float]]] = None,
     root_output_dir: Optional[str] = '/tmp/fed_opt',
@@ -82,16 +112,10 @@ def run(
         and `T` represents a python `Mapping` object.
 
   Args:
-    iterative_process_private: A private `tff.templates.IterativeProcess`
-      instance to run.
-    iterative_process_public: A public `tff.templates.IterativeProcess` instance
-      to run.
-    client_datasets_fn_private: Function accepts integer arguments (the round
-      number and the epoch) and returns a tuple of a list of private client
-      datasets to use as data data for that round, and the updated epoch index.
-    client_datasets_fn_public: Function accepts integer arguments (the round
-      number and the epoch) and returns a tuple of a list of public client
-      datasets to use as data data for that round, and the updated epoch index.
+    iterative_process: A `tff.templates.IterativeProcess` instance to run.
+    client_datasets_fn: Function accepts integer arguments (the round number and
+      the epoch) and returns a tuple of a list of client datasets to use as data
+      data for that round, and the updated epoch index.
     validation_fn: A callable accepting the `model` attribute of the iterative
       process state and returning a dict of evaluation metrics. Used to compute
       validation metrics throughout the training process.
@@ -102,8 +126,6 @@ def run(
       take the minimum of `total_rounds` and rounds_per_epoch*`total_epochs`.
     experiment_name: The name of the experiment being run. This will be appended
       to the `root_output_dir` for purposes of writing outputs.
-    warmstart_file: File to checkpoint to start training from
-      (typically a warmstarted model).
     train_eval_fn: An optional callable accepting the `model` attribute of the
       iterative process state and returning a dict of evaluation metrics. Used
       to compute training metrics over the entire training dataset throughout
@@ -130,16 +152,11 @@ def run(
   Returns:
     The final `state` of the iterative process after training.
   """
-  if not isinstance(iterative_process_private, tff.templates.IterativeProcess):
-    raise TypeError('iterative_process_private should be type '
+  if not isinstance(iterative_process, tff.templates.IterativeProcess):
+    raise TypeError('iterative_process should be type '
                     '`tff.templates.IterativeProcess`.')
-  if not isinstance(iterative_process_public, tff.templates.IterativeProcess):
-    raise TypeError('iterative_process_public should be type '
-                    '`tff.templates.IterativeProcess`.')
-  if not callable(client_datasets_fn_private):
-    raise TypeError('client_datasets_fn_private should be callable.')
-  if not callable(client_datasets_fn_public):
-    raise TypeError('client_datasets_fn_public should be callable.')
+  if not callable(client_datasets_fn):
+    raise TypeError('client_datasets_fn should be callable.')
   if not callable(validation_fn):
     raise TypeError('validation_fn should be callable.')
   if train_eval_fn is not None and not callable(train_eval_fn):
@@ -147,38 +164,21 @@ def run(
   if test_fn is not None and not callable(test_fn):
     raise TypeError('test_fn should be callable.')
 
-  initial_state = iterative_process_private.initialize()
+  logging.info('Starting iterative_process training loop...')
+  initial_state = iterative_process.initialize()
 
-  checkpoint_mngr, metrics_mngr, tensorboard_mngr = training_loop._setup_outputs(
+  checkpoint_mngr, metrics_mngr, tensorboard_mngr = _setup_outputs(
       root_output_dir, experiment_name, hparam_dict)
 
-  if warmstart_file == '':
-    logging.info('Asking checkpoint manager to load checkpoint.')
-    state, round_num = checkpoint_mngr.load_latest_checkpoint(initial_state)
+  logging.info('Asking checkpoint manager to load checkpoint.')
+  state, round_num = checkpoint_mngr.load_latest_checkpoint(initial_state)
 
-  else:
-    loading_state = LoadingState(
-        model=initial_state.model,
-        optimizer_state=initial_state.optimizer_state,
-        round_num=0,
-        dp_clip_norm=initial_state.dp_clip_norm,
-        dp_noise_std=initial_state.dp_noise_std)
-    logging.info('Asking checkpoint manager to load checkpoint.')
-    middle_state, round_num = checkpoint_mngr._load_checkpoint_from_path(
-        loading_state,
-        warmstart_file)
-
-    state = mime_v2.ServerState(
-        model = middle_state.model,
-        optimizer_state = middle_state.optimizer_state,
-        round_num=0,
-        dp_clip_norm=initial_state.dp_clip_norm,
-        dp_noise_std=initial_state.dp_noise_std,
-        mean_full_grad=initial_state.mean_full_grad)
-
-    logging.info('Finished loading warmstarted checkpoint from {}'.format(warmstart_file))
-
-  epoch = 0
+  # TODO(b/172867399): we disable restarting from checkpoint when shuffling
+  # client IDs by epochs. Non-trivial amount of change has to be made to make
+  # sure disjoint clients are used cross rounds when restarts. A better design
+  # of client dataset generator with random seed instead of `client_datasets_fn`
+  # accepting `epoch` as argument, can help.
+  epoch = 0 if total_epochs > 0 else -1
   if state is None or total_epochs > 0:
     state = initial_state
     round_num = 0
@@ -189,24 +189,10 @@ def run(
   metrics_mngr.clear_metrics(round_num)
 
   loop_start_time = time.time()
-
-  logging.info("Initial Public Iterative Process to get non-zero mean full grad")
-  federated_train_data_public, epoch = client_datasets_fn_public(round_num, epoch)
-    # 2. Update the control variates using the public clients
-  state_w_opt = iterative_process_public.next(
-        state, federated_train_data_public)
-
-  state = tff.structure.update_struct(
-      state,
-      mean_full_grad = state_w_opt.mean_full_grad)
-
-  while epoch <= total_epochs and round_num < total_rounds:
+  while epoch < total_epochs and round_num < total_rounds:
     data_prep_start_time = time.time()
     prev_epoch = epoch
-
-    federated_train_data_private, epoch = client_datasets_fn_private(round_num, epoch)
-    federated_train_data_public, epoch = client_datasets_fn_public(round_num, epoch)
-
+    federated_train_data, epoch = client_datasets_fn(round_num, epoch)
     # Server state is updated outside of TFF iterative process, which is used
     # to restart the tree in DP-FTRL.
     if server_state_epoch_update_fn is not None and epoch == prev_epoch + 1:
@@ -217,25 +203,7 @@ def run(
         'prepare_datasets_secs': time.time() - data_prep_start_time
     }
     training_start_time = time.time()
-
-    # 1. Update the model weights using the private clients using the old control variates
-    logging.info("Private Iterative Process")
-    state_w_weights = iterative_process_private.next(
-        state, federated_train_data_private)
-
-    logging.info("Public Iterative Process")
-    # 2. Update the control variates using the public clients
-    state_w_opt = iterative_process_public.next(
-        state, federated_train_data_public)
-
-    # 3. Merge updates from both states into original state variable
-    state = tff.structure.update_struct(
-      state,
-      model = state_w_weights.model,
-      optimizer_state = state_w_opt.optimizer_state,
-      mean_full_grad = state_w_opt.mean_full_grad,
-      round_num=round_num + tf.cast(1, tf.int32))
-
+    state, _ = iterative_process.next(state, federated_train_data)
     train_metrics['training_secs'] = time.time() - training_start_time
 
     logging.info('Round {:2d}, {:.2f}s per round in average.'.format(
@@ -266,8 +234,7 @@ def run(
       validation_metrics = validation_fn(state.model)
       validation_metrics['evaluate_secs'] = time.time() - evaluate_start_time
       metrics['eval'] = validation_metrics
-      training_loop._write_metrics(metrics_mngr, tensorboard_mngr, metrics,
-                                   round_num)
+      _write_metrics(metrics_mngr, tensorboard_mngr, metrics, round_num)
 
     round_num += 1
 
@@ -293,7 +260,53 @@ def run(
     test_metrics = test_fn(state.model)
     test_metrics['evaluate_secs'] = time.time() - test_start_time
     metrics['test'] = test_metrics
-  training_loop._write_metrics(metrics_mngr, tensorboard_mngr, metrics,
-                               round_num)
+  _write_metrics(metrics_mngr, tensorboard_mngr, metrics, round_num)
 
   return state
+
+
+class ClientIDShuffler(object):
+  """Shuffling clients in federated learning for DP-FTRL."""
+
+  def __init__(self,
+               clients_per_round: int,
+               client_data: tff.simulation.datasets.ClientData,
+               drop_remainder: bool = True):
+    self._client_ids = list(client_data.client_ids)
+    self._clients_per_round = clients_per_round
+    self._drop_remainder = drop_remainder
+    self._epoch = 0
+    self._start_index = 0
+
+  def _shuffle_client_ids(self):
+    random.shuffle(self._client_ids)
+    self._start_index = 0
+    self._epoch += 1
+
+  def sample_client_ids(self, round_num: int, epoch: int) -> Tuple[List, int]:  # pylint: disable=g-bare-generic
+    """Returns sampled client IDs and the updated epoch index.
+
+    This function can be used as `client_datasets_fn` in `training_loop.run`.
+
+    Args:
+      round_num: the current round index.
+      epoch: the current epoch index.
+    """
+    if epoch != self._epoch:
+      raise ValueError(
+          'Epoch index for client shuffling does not match: {} vs {}'.format(
+              epoch, self._epoch))
+    end_index = min(self._start_index + self._clients_per_round,
+                    len(self._client_ids))
+    sampled_ids = self._client_ids[self._start_index:end_index]
+    skip_remainder_flag = (
+        self._drop_remainder and
+        (end_index + self._clients_per_round) > len(self._client_ids))
+    if skip_remainder_flag or end_index >= len(self._client_ids):
+      logging.info(
+          'shuffling clients at epoch %d, round %d, client start index %d',
+          epoch, round_num, self._start_index)
+      self._shuffle_client_ids()
+    else:
+      self._start_index = end_index
+    return sampled_ids, self._epoch

@@ -21,8 +21,8 @@ from absl import logging
 import tensorflow_federated as tff
 import tensorflow as tf
 
-from federated_research.dp_ftrl import dp_fedavg
-from federated_research.dp_ftrl import training_loop
+from dp_ftrl import dp_fedavg
+from dp_ftrl import training_loop
 
 
 def run(
