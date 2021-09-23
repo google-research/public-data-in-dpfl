@@ -16,6 +16,7 @@
 import collections
 from typing import Callable, Collection, Optional
 import attr
+import math as m
 
 import tensorflow as tf
 import tensorflow_federated as tff
@@ -329,7 +330,7 @@ class CreatePrivateServerUpdateFn():
         mean_private_deltas=weights_delta_noised)
 
 @tf.function
-def public_server_update(model, server_optimizer, server_state, weights_delta, private_lr, alpha):
+def public_server_update(model, server_optimizer, server_state, weights_delta, private_lr, total_rounds):
   """Updates `server_state` based on `weights_delta`.
 
   Args:
@@ -358,6 +359,7 @@ def public_server_update(model, server_optimizer, server_state, weights_delta, p
   g_tensors = tf.nest.map_structure(tf.convert_to_tensor, server_state.mean_private_deltas)
 
   # Apply the update to the model, and return the updated state.
+  alpha = tf.math.cos(m.pi*server_state.round_num / (2*total_rounds))
   grad = tf.nest.map_structure(lambda g,mu_new,mu_old: -1.0 * (alpha * g + (1-alpha) * mu_new), g_tensors, weights_delta_tensors, mu_old_tensors)
   optimizer_state = server_optimizer.model_update(
       state=server_state.optimizer_state,
@@ -406,7 +408,7 @@ def build_averaging_process(
     private_lr=1.0,
     server_optimizer_fn=DEFAULT_SERVER_OPTIMIZER_FN,
     client_optimizer_fn=DEFAULT_CLIENT_OPTIMIZER_FN,
-    alpha = 0.8,
+    total_rounds = 1600,
     use_simulation_loop=True):
   """Builds the TFF computations for optimization using federated averaging.
 
@@ -464,7 +466,7 @@ def build_averaging_process(
     model = model_fn()
     model_weights = _get_model_weights(model)
     optimizer = server_optimizer_fn(model_weights.trainable)
-    return public_server_update(model, optimizer, server_state, model_delta, private_lr, alpha)
+    return public_server_update(model, optimizer, server_state, model_delta, private_lr, total_rounds)
 
   @tff.tf_computation(server_state_type, model_weights_type.trainable)
   def public_old_server_update_fn(server_state, model_delta):

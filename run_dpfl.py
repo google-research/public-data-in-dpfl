@@ -168,7 +168,6 @@ flags.DEFINE_float('public_data_percentage', 1.00, 'Percentage of original clien
 flags.DEFINE_integer('update_private_gradient_frequency',10,
                      'Epoch length for MD')
 flags.DEFINE_float('private_lr', 1.00, 'Learning rate for private update in MD update.')
-flags.DEFINE_float('alpha', 0.8, 'Alpha for convex gradient combinationin MD')
 
 HPARAM_FLAGS = [f for f in flags.FLAGS if f not in IRRELEVANT_FLAGS]
 FLAGS = flags.FLAGS
@@ -809,7 +808,7 @@ def _build_mirror_descent_model_and_process(input_spec, test_metrics, server_opt
         dp_clip_norm=FLAGS.clip_norm,
         dp_noise_std=noise_std,
         private_lr=FLAGS.private_lr,
-        alpha=FLAGS.alpha) 
+        total_rounds=FLAGS.total_rounds) 
   model = tff_model_fn()
 
   def evaluate_fn(model_weights, dataset):
