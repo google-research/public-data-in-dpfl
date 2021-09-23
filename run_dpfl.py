@@ -40,6 +40,7 @@ import scaffold_loop
 import mime_loop
 import mimelite_loop
 import mirror_descent
+import mirror_descent_convex
 import mirror_descent_loop
 
 from dp_ftrl import dp_fedavg
@@ -61,7 +62,8 @@ flags.DEFINE_enum('experiment_type', 'private', [
     'alternating_warmstart', 'alternating_warmstart_SO', 'mime', 'mime_SO',
     'mimelite', 'mimelite_SO', 'mimelite_warmstart','mimelite_warmstart_SO',
     'mime_warmstart','mime_warmstart_SO', 'stackoverflow_SGD',
-    'mirror_descent','mirror_descent_warmstart','mirror_descent_SO','mirror_descent_warmstart_SO'
+    'mirror_descent','mirror_descent_warmstart','mirror_descent_SO','mirror_descent_warmstart_SO',
+    'mirror_descent_convex','mirror_descent_convex_warmstart','mirror_descent_convex_SO','mirror_descent_convex_warmstart_SO'
 ], 'Experiment type that we wish to run.')
 flags.DEFINE_string('dataset', 'stackoverflow', 'Name of dataset for training,')
 flags.DEFINE_string('root_output_dir', '/tmp/dpftrl/public_dpfl',
@@ -166,6 +168,7 @@ flags.DEFINE_float('public_data_percentage', 1.00, 'Percentage of original clien
 flags.DEFINE_integer('update_private_gradient_frequency',10,
                      'Epoch length for MD')
 flags.DEFINE_float('private_lr', 1.00, 'Learning rate for private update in MD update.')
+flags.DEFINE_float('alpha', 0.8, 'Alpha for convex gradient combinationin MD')
 
 HPARAM_FLAGS = [f for f in flags.FLAGS if f not in IRRELEVANT_FLAGS]
 FLAGS = flags.FLAGS
@@ -225,7 +228,7 @@ def _preprocess_data(data_name, vocab_size, num_oov_buckets, sequence_length,
         # dataset='stackoverflow')
   elif data_name == 'stackoverflow_private':
     train_clientdata, _, test_clientdata = (
-        tff.simulation.datasets.stackoverflow.load_data(cache_dir='/scratch/hdd001/home/vinithms/data_dpfl/'))
+        tff.simulation.datasets.stackoverflow.load_data(cache_dir='/scratch/gobi2/vinithms/public-data-in-dpfl/data/'))
     dataset_vocab = nwp_dataset.create_vocab(vocab_size)
 
     base_test_dataset = test_clientdata.create_tf_dataset_from_all_clients()
@@ -255,7 +258,7 @@ def _preprocess_data(data_name, vocab_size, num_oov_buckets, sequence_length,
 
   elif data_name == 'stackoverflow_public':
     _, train_clientdata, test_clientdata = (
-        tff.simulation.datasets.stackoverflow.load_data(cache_dir='/scratch/hdd001/home/vinithms/data_dpfl/'))
+        tff.simulation.datasets.stackoverflow.load_data(cache_dir='/scratch/gobi2/vinithms/public-data-in-dpfl/data/'))
     # _, _, test_clientdata = (
     #     tff.simulation.datasets.stackoverflow.load_data())
     dataset_vocab = nwp_dataset.create_vocab(vocab_size)
@@ -788,15 +791,25 @@ def _build_mirror_descent_model_and_process(input_spec, test_metrics, server_opt
       name=FLAGS.client_optimizer,
       learning_rate=FLAGS.client_lr)
 
-  iterative_process = mirror_descent.build_averaging_process(
-      tff_model_fn,
-      server_optimizer_fn=server_optimizer_fn,
-      client_optimizer_fn=client_optimizer_fn,
-      update_type=update_type,
-      dp_clip_norm=FLAGS.clip_norm,
-      dp_noise_std=noise_std,
-      private_lr=FLAGS.private_lr)
-
+  if FLAGS.experiment_type == 'mirror_descent_SO' or FLAGS.experiment_type == 'mirror_descent_SO_warmstart':
+    iterative_process = mirror_descent.build_averaging_process(
+        tff_model_fn,
+        server_optimizer_fn=server_optimizer_fn,
+        client_optimizer_fn=client_optimizer_fn,
+        update_type=update_type,
+        dp_clip_norm=FLAGS.clip_norm,
+        dp_noise_std=noise_std,
+        private_lr=FLAGS.private_lr)
+  elif FLAGS.experiment_type == 'mirror_descent_convex_SO' or FLAGS.experiment_type == 'mirror_descent_convex_SO_warmstart':
+    iterative_process = mirror_descent_convex.build_averaging_process(
+        tff_model_fn,
+        server_optimizer_fn=server_optimizer_fn,
+        client_optimizer_fn=client_optimizer_fn,
+        update_type=update_type,
+        dp_clip_norm=FLAGS.clip_norm,
+        dp_noise_std=noise_std,
+        private_lr=FLAGS.private_lr,
+        alpha=FLAGS.alpha) 
   model = tff_model_fn()
 
   def evaluate_fn(model_weights, dataset):
@@ -1483,7 +1496,7 @@ def train_and_eval_mirror_descent():
       (name, FLAGS[name].value) for name in HPARAM_FLAGS
   ])
 
-  if FLAGS.experiment_type == 'mirror_descent_SO' or FLAGS.experiment_type == 'mirror_descent_warmstart_SO':
+  if FLAGS.experiment_type == 'mirror_descent_SO' or FLAGS.experiment_type == 'mirror_descent_warmstart_SO' or FLAGS.experiment_type == 'mirror_descent_convex_SO' or FLAGS.experiment_type == 'mirror_descent_convex_warmstart_SO':
      # Train on public SO
     train_dataset_computation_public, train_set_public, _, _ = _preprocess_data(
         'stackoverflow_public', FLAGS.vocab_size, FLAGS.num_oov_buckets,
@@ -1541,7 +1554,7 @@ def train_and_eval_mirror_descent():
       total_epochs = 0
 
       def client_dataset_ids_fn_public(round_num: int, epoch: int):
-        if FLAGS.experiment_type == 'mirror_descent_SO' or FLAGS.experiment_type == 'mirror_descent_warmstart_SO':
+        if FLAGS.experiment_type == 'mirror_descent_SO' or FLAGS.experiment_type == 'mirror_descent_warmstart_SO' or FLAGS.experiment_type == 'mirror_descent_convex_SO' or FLAGS.experiment_type == 'mirror_descent_convex_warmstart_SO':
           logging.info("Sampling from subset of public")
           return _sample_public_client_ids(FLAGS.clients_per_round, training_set_client_ids, round_num, epoch)
         else:
@@ -1635,6 +1648,8 @@ def main(argv):
   elif 'mimelite' == FLAGS.experiment_type or 'mimelite_SO' == FLAGS.experiment_type or 'mimelite_warmstart' == FLAGS.experiment_type or 'mimelite_warmstart_SO' == FLAGS.experiment_type:
     train_and_eval_mimelite()
   elif 'mirror_descent' == FLAGS.experiment_type or 'mirror_descent_SO' == FLAGS.experiment_type or 'mirror_descent_warmstart' == FLAGS.experiment_type or 'mirror_descent_warmstart_SO' == FLAGS.experiment_type:
+    train_and_eval_mirror_descent()
+  elif 'mirror_descent_convex' == FLAGS.experiment_type or 'mirror_descent_convex_SO' == FLAGS.experiment_type or 'mirror_descent_convex_warmstart' == FLAGS.experiment_type or 'mirror_descent_convex_warmstart_SO' == FLAGS.experiment_type:
     train_and_eval_mirror_descent()
   else:
     train_and_eval()

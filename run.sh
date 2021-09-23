@@ -38,7 +38,7 @@ python -u run_dpfl.py \
 --rounds_per_eval=1 \
 --clients_per_round=3 \
 --client_batch_size=4 \
---total_rounds=5 \
+--total_rounds=10 \
 --max_elements_per_user=16 \
---rounds_per_eval=5 \
+--rounds_per_eval=10 \
 --update_private_gradient_frequency=1

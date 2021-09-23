@@ -134,11 +134,11 @@ def run(
 
   if warmstart_file == '':
     logging.info('Asking checkpoint manager to load checkpoint.')
-    state, round_num = checkpoint_mngr.load_latest_checkpoint(initial_state)
+    state, global_round_num = checkpoint_mngr.load_latest_checkpoint(initial_state)
 
   else:
     logging.info('Asking checkpoint manager to load checkpoint.')
-    state, round_num = checkpoint_mngr._load_checkpoint_from_path(
+    state, global_global_round_num = checkpoint_mngr._load_checkpoint_from_path(
         initial_state,
         warmstart_file)
     logging.info('Finished loading warmstarted checkpoint from {}'.format(warmstart_file))
@@ -151,18 +151,20 @@ def run(
   epoch = 0 if total_epochs > 0 else -1
   if state is None or total_epochs > 0:
     state = initial_state
-    round_num = 0
-    logging.info('Initializing experiment from scratch at round %d.', round_num)
+    global_round_num = 0
+    logging.info('Initializing experiment from scratch at round %d.', global_round_num)
   else:
-    logging.info('Restarted from checkpoint round %d', round_num)
-    round_num += 1  # Increment to avoid overwriting current checkpoint
-  metrics_mngr.clear_metrics(round_num)
+    logging.info('Restarted from checkpoint round %d', global_round_num)
+    global_round_num += 1  # Increment to avoid overwriting current checkpoint
+  metrics_mngr.clear_metrics(global_round_num)
 
   loop_start_time = time.time()
   private_round_num = 0
   public_round_num = 0
   total_private_round_num = 0
   logging.info("Restart Optimizer Status", restart_optimizer)
+  private_epoch = epoch
+  public_epoch = epoch
   while epoch < total_epochs and private_round_num < total_rounds:
     data_prep_start_time = time.time()
     prev_epoch = epoch
@@ -174,13 +176,15 @@ def run(
     # Compute private gradient
 
     logging.info("Compute private deltas at old weights")
-    federated_train_data, epoch = client_datasets_fn_private(private_round_num, epoch)
+    federated_train_data, private_epoch = client_datasets_fn_private(private_round_num, private_epoch)
     state, _ = iterative_process_private.next(state, federated_train_data)
     private_round_num+=1
+    logging.info('Private Update {:2d}.'.format(
+          private_round_num))
 
 
     logging.info("Compute public deltas at old weights")
-    federated_train_data, epoch = client_datasets_fn_public(private_round_num, epoch)
+    federated_train_data, public_epoch = client_datasets_fn_public(private_round_num, public_epoch)
     state, _ = iterative_process_public_old.next(state, federated_train_data)
 
     logging.info("Start public update loop")
@@ -191,21 +195,21 @@ def run(
     training_start_time = time.time()
 
     while public_round_num < update_private_gradient_frequency:
-      federated_train_data, epoch = client_datasets_fn_public(private_round_num, epoch)
+      federated_train_data, public_epoch = client_datasets_fn_public(public_round_num, public_epoch)
       state, _ = iterative_process_public.next(state, federated_train_data)
       public_round_num+=1
-      round_num += 1
+      global_round_num += 1
 
       train_metrics['training_secs'] = time.time() - training_start_time
 
       logging.info('Round {:2d}, {:.2f}s per round in average.'.format(
-          round_num, (time.time() - loop_start_time) / (round_num + 1)))
+          global_round_num, (time.time() - loop_start_time) / (global_round_num + 1)))
 
-      if (round_num % rounds_per_checkpoint == 0 or
-          round_num == total_rounds - 1):
+      if (global_round_num % rounds_per_checkpoint == 0 or
+          global_round_num == total_rounds - 1):
         save_checkpoint_start_time = time.time()
         try:
-          checkpoint_mngr.save_checkpoint(state, round_num)
+          checkpoint_mngr.save_checkpoint(state, global_round_num)
         except Exception:  # pylint: disable=broad-except
           logging.info('Checkpoint saving exception: %s', Exception)
         train_metrics['save_checkpoint_secs'] = (
@@ -213,21 +217,21 @@ def run(
 
       metrics = {'train': train_metrics}
 
-      if train_eval_fn and round_num % rounds_per_train_eval == 0:
+      if train_eval_fn and global_round_num % rounds_per_train_eval == 0:
         # Compute metrics over the entire training dataset
         train_eval_start = time.time()
         train_eval_metrics = train_eval_fn(state.model)
         train_eval_metrics['evaluate_secs'] = time.time() - train_eval_start
         metrics['train_eval'] = train_eval_metrics
 
-      if round_num % rounds_per_eval == 0:
+      if global_round_num % rounds_per_eval == 0:
         # Compute validation metrics
         evaluate_start_time = time.time()
         validation_metrics = validation_fn(state.model)
         validation_metrics['evaluate_secs'] = time.time() - evaluate_start_time
         metrics['eval'] = validation_metrics
         training_loop._write_metrics(metrics_mngr, tensorboard_mngr, metrics,
-                                     round_num)
+                                     global_round_num)
 
     public_round_num = 0
 
@@ -254,6 +258,6 @@ def run(
     test_metrics['evaluate_secs'] = time.time() - test_start_time
     metrics['test'] = test_metrics
   training_loop._write_metrics(metrics_mngr, tensorboard_mngr, metrics,
-                               round_num)
+                               global_round_num)
 
   return state
