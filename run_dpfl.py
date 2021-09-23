@@ -197,7 +197,7 @@ def _preprocess_data(data_name, vocab_size, num_oov_buckets, sequence_length,
                      client_epochs_per_round, max_elements_per_user):
   if data_name == 'stackoverflow':
     train_clientdata, _, test_clientdata = (
-        tff.simulation.datasets.stackoverflow.load_data())
+        tff.simulation.datasets.stackoverflow.load_data(cache_dir='/scratch/hdd001/home/vinithms/data_dpfl/'))
     dataset_vocab = stackoverflow_dataset.create_vocab(vocab_size)
 
     base_test_dataset = test_clientdata.create_tf_dataset_from_all_clients()
@@ -225,7 +225,7 @@ def _preprocess_data(data_name, vocab_size, num_oov_buckets, sequence_length,
         # dataset='stackoverflow')
   elif data_name == 'stackoverflow_private':
     train_clientdata, _, test_clientdata = (
-        tff.simulation.datasets.stackoverflow.load_data(cache_dir='./data/'))
+        tff.simulation.datasets.stackoverflow.load_data(cache_dir='/scratch/hdd001/home/vinithms/data_dpfl/'))
     dataset_vocab = nwp_dataset.create_vocab(vocab_size)
 
     base_test_dataset = test_clientdata.create_tf_dataset_from_all_clients()
@@ -255,7 +255,7 @@ def _preprocess_data(data_name, vocab_size, num_oov_buckets, sequence_length,
 
   elif data_name == 'stackoverflow_public':
     _, train_clientdata, test_clientdata = (
-        tff.simulation.datasets.stackoverflow.load_data())
+        tff.simulation.datasets.stackoverflow.load_data(cache_dir='/scratch/hdd001/home/vinithms/data_dpfl/'))
     # _, _, test_clientdata = (
     #     tff.simulation.datasets.stackoverflow.load_data())
     dataset_vocab = nwp_dataset.create_vocab(vocab_size)
@@ -1617,6 +1617,7 @@ def main(argv):
                          'got: {}'.format(argv))
 
   # Multi-GPU configuration
+  print(argv)
   client_devices = tf.config.list_logical_devices('GPU')
   server_device = tf.config.list_logical_devices('CPU')[0]
   tff.backends.native.set_local_execution_context(
@@ -1624,7 +1625,7 @@ def main(argv):
       server_tf_device=server_device,
       client_tf_devices=client_devices,
       clients_per_thread=FLAGS.clients_per_thread)
-
+  print(FLAGS.experiment_type)
   if 'alternating' == FLAGS.experiment_type or 'alternating_SO' == FLAGS.experiment_type or 'alternating_warmstart' == FLAGS.experiment_type or 'alternating_warmstart_SO' == FLAGS.experiment_type:
     train_and_eval_alternating()
   elif 'scaffold' == FLAGS.experiment_type or 'scaffold_SO' == FLAGS.experiment_type:

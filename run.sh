@@ -18,15 +18,27 @@ set -x
 DATE=`date +%Y-%m-%d-%T`
 echo $DATE
 
-blaze run experimental/users/vinithms/public_dpfl:run_dpfl_federated_research --
+# blaze run experimental/users/vinithms/public_dpfl:run_dpfl_federated_research --
+# --server_optimizer=dpsgdm \
+# --experiment_type=private \
+# --dataset=stackoverflow \
+# --lstm_cell=LSTM \
+# --total_epochs=1 \
+# --rounds_per_eval=1 \
+# --clients_per_round=3 \
+# --client_batch_size=4 \
+# --total_rounds=100 \
+# --max_elements_per_user=16 \
+# --rounds_per_eval=5
+
+python -u run_dpfl.py \
 --server_optimizer=dpsgdm \
---experiment_type=private \
---dataset=stackoverflow \
---lstm_cell=LSTM \
+--experiment_type=mirror_descent_SO \
 --total_epochs=1 \
 --rounds_per_eval=1 \
 --clients_per_round=3 \
 --client_batch_size=4 \
---total_rounds=100 \
+--total_rounds=5 \
 --max_elements_per_user=16 \
---rounds_per_eval=5
+--rounds_per_eval=5 \
+--update_private_gradient_frequency=1
