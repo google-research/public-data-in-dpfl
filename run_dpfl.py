@@ -558,7 +558,6 @@ def _client_optimizer_fn(name, learning_rate, momentum=0.0):
   else:
     raise ValueError('Unknown client optimizer name {}'.format(name))
 
-
 def _sample_client_ids(
     num_clients: int,
     client_data: tff.simulation.datasets.ClientData,
