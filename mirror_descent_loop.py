@@ -42,7 +42,6 @@ class LoadingState(object):
   optimizer_state = attr.ib()
   round_num = attr.ib()
   dp_clip_norm= attr.ib()
-  dp_noise_std=attr.ib()
   # This is a float to avoid type incompatibility when calculating learning rate
   # schedules.
 
@@ -162,8 +161,7 @@ def run(
         model=initial_state.model,
         optimizer_state=initial_state.optimizer_state,
         round_num=0,
-        dp_clip_norm=initial_state.dp_clip_norm,
-        dp_noise_std=initial_state.dp_noise_std)
+        dp_clip_norm=initial_state.dp_clip_norm)
     logging.info('Asking checkpoint manager to load checkpoint.')
     middle_state, global_round_num = checkpoint_mngr._load_checkpoint_from_path(
         loading_state,
