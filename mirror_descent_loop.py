@@ -15,6 +15,7 @@
 
 import time
 import collections
+import attr
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from absl import logging
@@ -23,7 +24,27 @@ import tensorflow as tf
 
 from dp_ftrl import dp_fedavg
 from dp_ftrl import training_loop
+import mirror_descent
 
+@attr.s(eq=False, order=False, frozen=True)
+class LoadingState(object):
+  """Structure for state on the server.
+
+  Attributes:
+    model: A `tff.learning.ModelWeights` instance.
+    optimizer_state: A namedtuple of the optimizer variables.
+    round_num: The current training round, as a float.
+    dp_clip_norm: L2 norm to clip client gradients.
+    dp_noise_std: Standard deviation of Gaussian distribution to sample noise
+     to add to gradients for differential privacy.
+  """
+  model = attr.ib()
+  optimizer_state = attr.ib()
+  round_num = attr.ib()
+  dp_clip_norm= attr.ib()
+  dp_noise_std=attr.ib()
+  # This is a float to avoid type incompatibility when calculating learning rate
+  # schedules.
 
 def run(
     iterative_process_private: tff.templates.IterativeProcess,
@@ -137,10 +158,25 @@ def run(
     state, global_round_num = checkpoint_mngr.load_latest_checkpoint(initial_state)
 
   else:
+    loading_state = LoadingState(
+        model=initial_state.model,
+        optimizer_state=initial_state.optimizer_state,
+        round_num=0,
+        dp_clip_norm=initial_state.dp_clip_norm,
+        dp_noise_std=initial_state.dp_noise_std)
     logging.info('Asking checkpoint manager to load checkpoint.')
-    state, global_global_round_num = checkpoint_mngr._load_checkpoint_from_path(
-        initial_state,
+    middle_state, global_round_num = checkpoint_mngr._load_checkpoint_from_path(
+        loading_state,
         warmstart_file)
+    state = mirror_descent.ServerState(
+        model = middle_state.model,
+        optimizer_state = middle_state.optimizer_state,
+        round_num=0,
+        dp_clip_norm=initial_state.dp_clip_norm,
+        dp_noise_std=initial_state.dp_noise_std,
+        mean_private_deltas=initial_state.mean_private_deltas,
+        public_old_deltas=initial_state.public_old_deltas)
+
     logging.info('Finished loading warmstarted checkpoint from {}'.format(warmstart_file))
 
   # TODO(b/172867399): we disable restarting from checkpoint when shuffling
