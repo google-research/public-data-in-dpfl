@@ -41,7 +41,9 @@ import mime_loop
 import mimelite_loop
 import mirror_descent
 import mirror_descent_convex
+import mirror_descent_convex_v2
 import mirror_descent_loop
+import mirror_descent_convex_loop_v2
 
 from dp_ftrl import dp_fedavg
 from dp_ftrl import optimizer_utils
@@ -66,7 +68,7 @@ flags.DEFINE_enum('experiment_type', 'private', [
     'mirror_descent_convex','mirror_descent_convex_warmstart','mirror_descent_convex_SO','mirror_descent_convex_warmstart_SO'
 ], 'Experiment type that we wish to run.')
 flags.DEFINE_string('dataset', 'stackoverflow', 'Name of dataset for training,')
-flags.DEFINE_string('root_output_dir', '/tmp/dpftrl/public_dpfl',
+flags.DEFINE_string('root_output_dir', '/scratch/gobi2/vinithms/dpftrl/public_dpfl/dp_md/',
                     'Root directory for writing experiment output.')
 flags.DEFINE_integer('rounds_per_checkpoint', 20,
                      'How often to checkpoint the global model.')
@@ -799,7 +801,7 @@ def _build_mirror_descent_model_and_process(input_spec, test_metrics, server_opt
         dp_noise_std=noise_std,
         private_lr=FLAGS.private_lr)
   elif FLAGS.experiment_type == 'mirror_descent_convex_SO' or FLAGS.experiment_type == 'mirror_descent_convex_SO_warmstart':
-    iterative_process = mirror_descent_convex.build_averaging_process(
+    iterative_process = mirror_descent_convex_v2.build_averaging_process(
         tff_model_fn,
         server_optimizer_fn=server_optimizer_fn,
         client_optimizer_fn=client_optimizer_fn,
@@ -1526,8 +1528,9 @@ def train_and_eval_mirror_descent():
           input_spec_private, metrics, FLAGS.private_server_optimizer, 'private')
       iterative_process_public, _, _ = _build_mirror_descent_model_and_process(
           input_spec_public, metrics, FLAGS.public_server_optimizer, 'public')
-      iterative_process_public_old, _, _ = _build_mirror_descent_model_and_process(
-          input_spec_public, metrics, FLAGS.public_server_optimizer, 'public_old')
+      if 'convex' not in FLAGS.experiment_type:
+        iterative_process_public_old, _, _ = _build_mirror_descent_model_and_process(
+            input_spec_public, metrics, FLAGS.public_server_optimizer, 'public_old')
 
 
   iterative_process_private = tff.simulation.compose_dataset_computation_with_iterative_process(
@@ -1538,9 +1541,10 @@ def train_and_eval_mirror_descent():
         dataset_computation=train_dataset_computation_public,
         process=iterative_process_public)
 
-  iterative_process_public_old = tff.simulation.compose_dataset_computation_with_iterative_process(
-        dataset_computation=train_dataset_computation_public,
-        process=iterative_process_public_old)
+  if 'convex' not in FLAGS.experiment_type:
+    iterative_process_public_old = tff.simulation.compose_dataset_computation_with_iterative_process(
+          dataset_computation=train_dataset_computation_public,
+          process=iterative_process_public_old)
 
   if FLAGS.total_epochs is None:
 
@@ -1576,7 +1580,7 @@ def train_and_eval_mirror_descent():
                    FLAGS.total_epochs, FLAGS.total_rounds)
       total_epochs = FLAGS.total_epochs
 
-  if 'warmstart' in FLAGS.experiment_type:
+  if 'warmstart' in FLAGS.experiment_type and not 'convex' in FLAGS.experiment_type:
     mirror_descent_loop.run(
           iterative_process_private,
           client_dataset_ids_fn_private,
@@ -1597,6 +1601,47 @@ def train_and_eval_mirror_descent():
           rounds_per_checkpoint=FLAGS.rounds_per_checkpoint,
           rounds_per_train_eval=2000,
           update_private_gradient_frequency=FLAGS.update_private_gradient_frequency,
+          restart_optimizer=FLAGS.restart_optimizer,
+          server_state_epoch_update_fn=server_state_update_fn)
+  elif 'convex' in FLAGS.experiment_type and not 'warmstart' in FLAGS.experiment_type:
+    mirror_descent_convex_loop_v2.run(
+          iterative_process_private,
+          client_dataset_ids_fn_private,
+          iterative_process_public,
+          client_dataset_ids_fn_public,
+          validation_fn=functools.partial(
+              evaluate_fn, dataset=validation_set_private),
+          total_epochs=total_epochs,
+          total_rounds=FLAGS.total_rounds,
+          experiment_name=FLAGS.experiment_name,
+          train_eval_fn=None,
+          test_fn=functools.partial(evaluate_fn, dataset=test_set_private),
+          root_output_dir=FLAGS.root_output_dir,
+          hparam_dict=hparam_dict,
+          rounds_per_eval=FLAGS.rounds_per_eval,
+          rounds_per_checkpoint=FLAGS.rounds_per_checkpoint,
+          rounds_per_train_eval=2000,
+          restart_optimizer=FLAGS.restart_optimizer,
+          server_state_epoch_update_fn=server_state_update_fn)
+  elif 'convex' in FLAGS.experiment_type and 'warmstart' in FLAGS.experiment_type:
+    mirror_descent_convex_loop_v2.run(
+          iterative_process_private,
+          client_dataset_ids_fn_private,
+          iterative_process_public,
+          client_dataset_ids_fn_public,
+          warmstart_file=FLAGS.warmstart_file,
+          validation_fn=functools.partial(
+              evaluate_fn, dataset=validation_set_private),
+          total_epochs=total_epochs,
+          total_rounds=FLAGS.total_rounds,
+          experiment_name=FLAGS.experiment_name,
+          train_eval_fn=None,
+          test_fn=functools.partial(evaluate_fn, dataset=test_set_private),
+          root_output_dir=FLAGS.root_output_dir,
+          hparam_dict=hparam_dict,
+          rounds_per_eval=FLAGS.rounds_per_eval,
+          rounds_per_checkpoint=FLAGS.rounds_per_checkpoint,
+          rounds_per_train_eval=2000,
           restart_optimizer=FLAGS.restart_optimizer,
           server_state_epoch_update_fn=server_state_update_fn)
   else:
