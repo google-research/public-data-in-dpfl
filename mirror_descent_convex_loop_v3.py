@@ -24,7 +24,7 @@ import tensorflow as tf
 
 from dp_ftrl import dp_fedavg
 from dp_ftrl import training_loop
-import mirror_descent_convex_v2
+import mirror_descent_convex_v3
 
 @attr.s(eq=False, order=False, frozen=True)
 class LoadingState(object):
@@ -161,13 +161,12 @@ def run(
     middle_state, round_num = checkpoint_mngr._load_checkpoint_from_path(
         loading_state,
         warmstart_file)
-    state = mirror_descent_convex_v2.ServerState(
+    state = mirror_descent_convex_v3.ServerState(
         model = middle_state.model,
         optimizer_state = middle_state.optimizer_state,
         round_num=0,
         dp_clip_norm=initial_state.dp_clip_norm,
-        dp_noise_std=initial_state.dp_noise_std,
-        mean_private_deltas=initial_state.mean_private_deltas)
+        mean_public_deltas=initial_state.mean_public_deltas)
 
     logging.info('Finished loading warmstarted checkpoint from {}'.format(warmstart_file))
 
@@ -187,7 +186,7 @@ def run(
   metrics_mngr.clear_metrics(round_num)
 
   loop_start_time = time.time()
-  logging.info("Restart Optimizer Status", restart_optimizer)
+  # logging.info("Restart Optimizer Status", restart_optimizer)
 
   while epoch < total_epochs and round_num < total_rounds:
     data_prep_start_time = time.time()
@@ -198,15 +197,15 @@ def run(
     }
     training_start_time = time.time()
     # Compute private gradient
-    logging.info("Compute private deltas")
+    # logging.info("Compute public deltas")
+    # federated_train_data, epoch = client_datasets_fn_public(round_num, epoch)
+    # state, _ = iterative_process_public.next(state, federated_train_data)
+    # logging.info('Public Update {:2d}.'.format(
+    #       round_num))
+
+    logging.info("Compute private deltas and convex combined updated")
     federated_train_data, epoch = client_datasets_fn_private(round_num, epoch)
     state, _ = iterative_process_private.next(state, federated_train_data)
-    logging.info('Private Update {:2d}.'.format(
-          round_num))
-
-    logging.info("Compute public deltas and convex combined updated")
-    federated_train_data, epoch = client_datasets_fn_public(round_num, epoch)
-    state, _ = iterative_process_public.next(state, federated_train_data)
 
     train_metrics['training_secs'] = time.time() - training_start_time
 

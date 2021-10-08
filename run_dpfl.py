@@ -42,8 +42,10 @@ import mimelite_loop
 import mirror_descent
 import mirror_descent_convex
 import mirror_descent_convex_v2
+import mirror_descent_convex_v3
 import mirror_descent_loop
 import mirror_descent_convex_loop_v2
+import mirror_descent_convex_loop_v3
 
 from dp_ftrl import dp_fedavg
 from dp_ftrl import optimizer_utils
@@ -54,6 +56,7 @@ from utils.datasets import stackoverflow_word_prediction as stackoverflow_datase
 
 
 IRRELEVANT_FLAGS = frozenset(iter(flags.FLAGS))
+RANDOM_SEED=0
 
 flags.DEFINE_string(
     'experiment_name', 'stackoverflow', 'The name of this experiment. Will be'
@@ -68,7 +71,7 @@ flags.DEFINE_enum('experiment_type', 'private', [
     'mirror_descent_convex','mirror_descent_convex_warmstart','mirror_descent_convex_SO','mirror_descent_convex_warmstart_SO'
 ], 'Experiment type that we wish to run.')
 flags.DEFINE_string('dataset', 'stackoverflow', 'Name of dataset for training,')
-flags.DEFINE_string('root_output_dir', '/scratch/gobi2/vinithms/dpftrl/public_dpfl/dp_md/',
+flags.DEFINE_string('root_output_dir', '/scratch/gobi2/vinithms/public-data-in-dpfl/dp_md_warmstart/',
                     'Root directory for writing experiment output.')
 flags.DEFINE_integer('rounds_per_checkpoint', 20,
                      'How often to checkpoint the global model.')
@@ -144,7 +147,7 @@ flags.DEFINE_boolean('warmstart', False,
                      'Boolean indicating whether to warm start the model')
 flags.DEFINE_string('private_server_optimizer','dpsgdm',
                     'Optimizer for private updates.')
-flags.DEFINE_string('public_server_optimizer', 'sgdm',
+flags.DEFINE_string('public_server_optimizer', 'dpsgdm',
                     'Optimizer for public updates.')
 flags.DEFINE_integer('private_client_batch_size', 16, 'Batch size used on the private clients.')
 flags.DEFINE_integer('public_client_batch_size', 16, 'Batch size used on the public clients.')
@@ -204,7 +207,7 @@ def _preprocess_data(data_name, vocab_size, num_oov_buckets, sequence_length,
         tff.simulation.datasets.stackoverflow.load_data(cache_dir='/scratch/hdd001/home/vinithms/data_dpfl/'))
     dataset_vocab = stackoverflow_dataset.create_vocab(vocab_size)
 
-    base_test_dataset = test_clientdata.create_tf_dataset_from_all_clients()
+    base_test_dataset = test_clientdata.create_tf_dataset_from_all_clients(seed=RANDOM_SEED)
     preprocess_val_and_test = stackoverflow_dataset.create_preprocess_fn(
         vocab=dataset_vocab,
         num_oov_buckets=num_oov_buckets,
@@ -232,7 +235,7 @@ def _preprocess_data(data_name, vocab_size, num_oov_buckets, sequence_length,
         tff.simulation.datasets.stackoverflow.load_data(cache_dir='/scratch/gobi2/vinithms/public-data-in-dpfl/data/'))
     dataset_vocab = nwp_dataset.create_vocab(vocab_size)
 
-    base_test_dataset = test_clientdata.create_tf_dataset_from_all_clients()
+    base_test_dataset = test_clientdata.create_tf_dataset_from_all_clients(seed=RANDOM_SEED)
     preprocess_val_and_test = nwp_dataset.create_preprocess_fn(
         vocab=dataset_vocab,
         num_oov_buckets=num_oov_buckets,
@@ -260,11 +263,9 @@ def _preprocess_data(data_name, vocab_size, num_oov_buckets, sequence_length,
   elif data_name == 'stackoverflow_public':
     _, train_clientdata, test_clientdata = (
         tff.simulation.datasets.stackoverflow.load_data(cache_dir='/scratch/gobi2/vinithms/public-data-in-dpfl/data/'))
-    # _, _, test_clientdata = (
-    #     tff.simulation.datasets.stackoverflow.load_data())
     dataset_vocab = nwp_dataset.create_vocab(vocab_size)
 
-    base_test_dataset = test_clientdata.create_tf_dataset_from_all_clients()
+    base_test_dataset = test_clientdata.create_tf_dataset_from_all_clients(seed=RANDOM_SEED)
     preprocess_val_and_test = nwp_dataset.create_preprocess_fn(
         vocab=dataset_vocab,
         num_oov_buckets=num_oov_buckets,
@@ -306,7 +307,7 @@ def _preprocess_scaffold_data(vocab_size, num_oov_buckets, sequence_length,
       tff.simulation.datasets.stackoverflow.load_data())
     dataset_vocab =stackoverflow_dataset.create_vocab(vocab_size)
 
-    base_test_dataset = test_clientdata.create_tf_dataset_from_all_clients()
+    base_test_dataset = test_clientdata.create_tf_dataset_from_all_clients(seed=RANDOM_SEED)
     preprocess_val_and_test = nwp_dataset.create_preprocess_fn(
         vocab=dataset_vocab,
         num_oov_buckets=num_oov_buckets,
@@ -370,7 +371,7 @@ def _preprocess_mime_data(vocab_size, num_oov_buckets, sequence_length,
 
     dataset_vocab =stackoverflow_dataset.create_vocab(vocab_size)
 
-    base_test_dataset = test_clientdata.create_tf_dataset_from_all_clients()
+    base_test_dataset = test_clientdata.create_tf_dataset_from_all_clients(seed=RANDOM_SEED)
     preprocess_val_and_test = nwp_dataset.create_preprocess_fn(
         vocab=dataset_vocab,
         num_oov_buckets=num_oov_buckets,
@@ -433,7 +434,7 @@ def _preprocess_mimelite_data(vocab_size, num_oov_buckets, sequence_length,
       tff.simulation.datasets.stackoverflow.load_data())
     dataset_vocab =stackoverflow_dataset.create_vocab(vocab_size)
 
-    base_test_dataset = test_clientdata.create_tf_dataset_from_all_clients()
+    base_test_dataset = test_clientdata.create_tf_dataset_from_all_clients(seed=RANDOM_SEED)
     preprocess_val_and_test = nwp_dataset.create_preprocess_fn(
         vocab=dataset_vocab,
         num_oov_buckets=num_oov_buckets,
@@ -779,13 +780,16 @@ def _build_mirror_descent_model_and_process(input_spec, test_metrics, server_opt
     loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
     return dp_fedavg.KerasModelWrapper(keras_model, input_spec, loss)
 
-  noise_std = FLAGS.clip_norm * FLAGS.noise_multiplier / float(
-      FLAGS.clients_per_round)
+  if update_type == 'private':
+    noise_std = FLAGS.clip_norm * FLAGS.noise_multiplier / float(
+        FLAGS.private_round_size)
+  elif update_type == 'public':
+    noise_std = 0.0
   server_optimizer_fn = functools.partial(
       _server_optimizer_fn,
       name=server_optimizer,
       learning_rate=FLAGS.server_lr,
-      noise_std=0.0)
+      noise_std=noise_std)
   client_optimizer_fn = functools.partial(
       _client_optimizer_fn,
       name=FLAGS.client_optimizer,
@@ -800,16 +804,16 @@ def _build_mirror_descent_model_and_process(input_spec, test_metrics, server_opt
         dp_clip_norm=FLAGS.clip_norm,
         dp_noise_std=noise_std,
         private_lr=FLAGS.private_lr)
-  elif FLAGS.experiment_type == 'mirror_descent_convex_SO' or FLAGS.experiment_type == 'mirror_descent_convex_SO_warmstart':
-    iterative_process = mirror_descent_convex_v2.build_averaging_process(
+  
+  elif FLAGS.experiment_type == 'mirror_descent_convex_SO' or FLAGS.experiment_type == 'mirror_descent_convex_warmstart_SO':
+    iterative_process = mirror_descent_convex_v3.build_averaging_process(
         tff_model_fn,
         server_optimizer_fn=server_optimizer_fn,
         client_optimizer_fn=client_optimizer_fn,
         update_type=update_type,
         dp_clip_norm=FLAGS.clip_norm,
-        dp_noise_std=noise_std,
-        private_lr=FLAGS.private_lr,
         total_rounds=FLAGS.total_rounds) 
+
   model = tff_model_fn()
 
   def evaluate_fn(model_weights, dataset):
@@ -821,44 +825,6 @@ def _build_mirror_descent_model_and_process(input_spec, test_metrics, server_opt
   server_state_update_fn = _build_server_state_epoch_update_fn(
       FLAGS.server_optimizer, tff_model_fn, server_optimizer_fn)
   return iterative_process, evaluate_fn, server_state_update_fn
-
-# def _build_stackoverflow_SGD_process(input_spec, test_metrics):
-#   """Build Keras opt checkpoint iterative process."""
-
-#   def tff_model_fn():
-#     keras_model = models.create_recurrent_model(
-#         vocab_size=FLAGS.vocab_size,
-#         embedding_size=FLAGS.embedding_size,
-#         latent_size=FLAGS.latent_size,
-#         num_layers=FLAGS.num_layers,
-#         shared_embedding=FLAGS.shared_embedding,
-#         cell_type=FLAGS.lstm_cell)
-#     loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
-#     return dp_fedavg.KerasModelWrapper(keras_model, input_spec, loss)
-
-#   server_optimizer_fn = tf.keras.optimizers.SGD
-#   client_optimizer_fn = tf.keras.optimizers.SGD
-#   iterative_process = public.build_federated_averaging_process(
-#         tff_model_fn,
-#         dp_clip_norm=FLAGS.clip_norm,
-#         server_optimizer_fn=server_optimizer_fn,
-#         client_optimizer_fn=client_optimizer_fn,
-#         server_learning_rate=FLAGS.server_lr,
-#         server_momentum=FLAGS.server_momentum,
-#         client_learning_rate=FLAGS.client_lr,
-#         dp_noise_std=0.0)
-
-#   model = tff_model_fn()
-
-#   def evaluate_fn(model_weights, dataset):
-#     model.from_weights(model_weights)
-#     metrics = dp_fedavg.keras_evaluate(model.keras_model, dataset, test_metrics)
-#     return collections.OrderedDict(
-#         (metric.name, metric.result().numpy()) for metric in metrics)
-
-#   server_state_update_fn = _build_server_state_epoch_update_fn(
-#       FLAGS.server_optimizer, tff_model_fn, server_optimizer_fn)
-#   return iterative_process, evaluate_fn, server_state_update_fn
 
 def _build_tff_learning_model_and_process(input_spec, test_metrics,
                                           server_optimizer: str = 'sgd'):
@@ -1374,7 +1340,7 @@ def train_and_eval():
                          FLAGS.max_elements_per_user))
 
     client_ids_size = int(100)
-    training_set_client_ids = random.sample(train_set.client_ids, client_ids_size)
+    training_set_client_ids = train_set.client_ids[:client_ids_size]
 
   elif FLAGS.experiment_type == 'warmstart':
     # Evaluate on StackOverflow
@@ -1405,6 +1371,7 @@ def train_and_eval():
 
      logging.info('Sample clients for max %d rounds', FLAGS.total_rounds)
      total_epochs = 0
+
     else:
      client_shuffer = training_loop.ClientIDShuffler(FLAGS.clients_per_round,
                                                     train_set)
@@ -1440,9 +1407,6 @@ def train_and_eval():
 
   if FLAGS.use_tff_learning:
     iterative_process, evaluate_fn, server_state_update_fn = _build_tff_learning_model_and_process(
-        input_spec, metrics)
-  elif FLAGS.experiment_type == 'stackoverflow_SGD':
-    iterative_process, evaluate_fn, server_state_update_fn = _build_stackoverflow_SGD_process(
         input_spec, metrics)
   else:
     iterative_process, evaluate_fn, server_state_update_fn = _build_custom_model_and_process(
@@ -1512,7 +1476,7 @@ def train_and_eval_mirror_descent():
         FLAGS.max_elements_per_user)
 
     client_ids_size = int(100)
-    training_set_client_ids = random.sample(train_set_public.client_ids, client_ids_size)
+    training_set_client_ids = train_set_public.client_ids[:client_ids_size]
 
   input_spec_private = train_dataset_computation_private.type_signature.result.element
   input_spec_public = train_dataset_computation_public.type_signature.result.element
@@ -1558,7 +1522,7 @@ def train_and_eval_mirror_descent():
       def client_dataset_ids_fn_public(round_num: int, epoch: int):
         if FLAGS.experiment_type == 'mirror_descent_SO' or FLAGS.experiment_type == 'mirror_descent_warmstart_SO' or FLAGS.experiment_type == 'mirror_descent_convex_SO' or FLAGS.experiment_type == 'mirror_descent_convex_warmstart_SO':
           logging.info("Sampling from subset of public")
-          return _sample_public_client_ids(FLAGS.clients_per_round, training_set_client_ids, round_num, epoch)
+          return _sample_public_client_ids(FLAGS.public_round_size, training_set_client_ids, round_num, epoch)
         else:
           return _sample_client_ids(FLAGS.public_round_size, train_set_public,
                                   round_num, epoch)
@@ -1624,7 +1588,7 @@ def train_and_eval_mirror_descent():
           restart_optimizer=FLAGS.restart_optimizer,
           server_state_epoch_update_fn=server_state_update_fn)
   elif 'convex' in FLAGS.experiment_type and 'warmstart' in FLAGS.experiment_type:
-    mirror_descent_convex_loop_v2.run(
+    mirror_descent_convex_loop_v3.run(
           iterative_process_private,
           client_dataset_ids_fn_private,
           iterative_process_public,

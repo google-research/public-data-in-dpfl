@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""An implementation of Federated Mirror Descent (w/ convex combination loss).
+"""An implementation of Federated Mirror Descent (V2).
 """
 import collections
 from typing import Callable, Collection, Optional
@@ -29,7 +29,6 @@ from utils import tensor_utils
 DEFAULT_SERVER_OPTIMIZER_FN = lambda w: optimizer_utils.SGDServerOptimizer(  # pylint: disable=g-long-lambda
     learning_rate=1.0)
 DEFAULT_CLIENT_OPTIMIZER_FN = lambda: tf.keras.optimizers.SGD(learning_rate=0.1)
-
 
 def _dataset_reduce_fn(reduce_fn, dataset, initial_state_fn):
   return dataset.reduce(initial_state=initial_state_fn(), reduce_func=reduce_fn)
@@ -145,7 +144,6 @@ def keras_evaluate(model, test_data, metrics):
       metric.update_state(y_true=batch_y, y_pred=preds)
   return metrics
 
-
 @attr.s(eq=False, frozen=True, slots=True)
 class BroadcastMessage(object):
   """Structure for tensors broadcasted by server during federated optimization.
@@ -189,6 +187,173 @@ class ClientOutput(object):
   client_weight = attr.ib()
   model_output = attr.ib()
 
+
+@attr.s(eq=False, frozen=True, slots=True)
+class ServerState(object):
+  """Structure for state on the server.
+
+  Fields:
+  -   `model`: A dictionary of model's trainable variables.
+  -   `optimizer_state`: Server optimizer states.
+  -   'round_num': Current round index
+  -   `dp_clip_norm`: L2 norm to clip client gradients.
+  -   `dp_noise_std`: Standard deviation of Gaussian distribution to sample noise
+        to add to gradients for differential privacy.
+  -   `mean_private_deltas`: Average deltas from private clients
+  -   `public_old_deltas`: Average deltas from public clients on old weights
+  """
+
+  model = attr.ib()
+  optimizer_state = attr.ib()
+  round_num = attr.ib()
+  dp_clip_norm = attr.ib()
+  mean_public_deltas = attr.ib()
+
+class CreatePrivateServerUpdateFn():
+  """Returns a tf.function for the client_update.
+
+  This "create" fn is necesessary to prevent
+  "ValueError: Creating variables on a non-first call to a function decorated
+  with tf.function" errors due to the client optimizer creating variables. This
+  is really only needed because we test the client_update function directly.
+  """
+
+  def __init__(self):
+    self.random_generator = tf.random.Generator.from_non_deterministic_state()
+
+  def _noise_fn(self, noise_std: float, model_weight_specs: Collection[tf.TensorSpec]):
+    """Returns random noise to be added for differential privacy."""
+
+    def noise_tensor(spec):
+      noise = self.random_generator.normal(spec.shape, stddev=noise_std)
+      # TODO(b/177259859): reshape because the shape of the noise could have
+      # None/? that fails TFF type check.
+      noise = tf.reshape(noise, spec.shape)
+      return noise
+
+    return tf.nest.map_structure(noise_tensor, model_weight_specs)
+
+  @tf.function
+  def __call__(self, model,
+                    optimizer,
+                    server_state,
+                    weights_delta):
+    """Updates `server_state` based on `weights_delta`, increase the round number.
+
+    Args:
+      model: A `tff.learning.Model`.
+      optimizer: A `tf.keras.optimizers.Optimizer`.
+      server_state: A `ServerState`, the state to be updated.
+      weights_delta: An update to the trainable variables of the model.
+
+    Returns:
+      An updated `ServerState`.
+    """
+    weights_delta, has_non_finite_weight = (
+      tensor_utils.zero_all_if_any_non_finite(weights_delta))
+    if has_non_finite_weight > 0:
+      return server_state
+      
+    model_weights = _get_model_weights(model)
+    tf.nest.map_structure(lambda v, t: v.assign(t), model_weights,
+                          server_state.model)
+
+    model_weight_specs = tf.nest.map_structure(
+        lambda v: tf.TensorSpec(v.shape, v.dtype), model_weights.trainable)
+
+    noise_tensor = self._noise_fn(server_state.dp_noise_std, model_weight_specs)
+    # Compute new model weights.
+    weights_delta_noised = tf.nest.map_structure(lambda a, n: a + n,
+                                       weights_delta, noise_tensor)
+
+    # Create a new state based on the updated model.
+    return tff.structure.update_struct(
+        server_state,
+        model=model_weights,
+        mean_private_deltas=weights_delta_noised)
+
+@tf.function
+def private_server_update(model, server_optimizer, server_state, weights_delta, total_rounds):
+  """Updates `server_state` based on `weights_delta`.
+
+  Args:
+    model: A `KerasModelWrapper` or `tff.learning.Model`.
+    server_optimizer: A `ServerOptimizerBase`.
+    server_state: A `ServerState`, the state to be updated.
+    weights_delta: A nested structure of tensors holding the updates to the
+      trainable variables of the model.
+    private_lr: Learning rate to apply to the average private gradient.
+
+  Returns:
+    An updated `ServerState`.
+  """
+  weights_delta, has_non_finite_weight = (
+      tensor_utils.zero_all_if_any_non_finite(weights_delta))
+  if has_non_finite_weight > 0:
+    return server_state
+
+  # Initialize the model with the current state.
+  model_weights = _get_model_weights(model)
+  tf.nest.map_structure(lambda v, t: v.assign(t), model_weights,
+                        server_state.model)
+
+  weights_delta_tensors = tf.nest.map_structure(tf.convert_to_tensor, weights_delta)
+  public_delta_tensors = tf.nest.map_structure(tf.convert_to_tensor, server_state.mean_public_deltas)
+
+  pi =  tf.constant(m.pi, dtype=tf.float32)
+  round_num = tf.cast(server_state.round_num, dtype=tf.float32)
+  total_rounds = tf.constant(total_rounds, dtype=tf.float32)
+  theta_value = tf.math.divide(tf.math.multiply(pi,round_num),tf.math.multiply(2.0, total_rounds))
+  alpha = 1.0
+  grad = tf.nest.map_structure(lambda g,mu_new: -1.0 * (alpha * g + (1.0-alpha) * mu_new), weights_delta_tensors, public_delta_tensors)
+  # grad = tf.nest.map_structure(lambda x: -1.0 * x, weights_delta)
+
+  # Apply the update to the model, and return the updated state.
+  optimizer_state = server_optimizer.model_update(
+      state=server_state.optimizer_state,
+      weight=model_weights.trainable,
+      grad=grad,
+      round_idx=server_state.round_num)
+
+  # Create a new state based on the updated model.
+  return tff.structure.update_struct(
+      server_state,
+      model=model_weights,
+      optimizer_state=optimizer_state,
+      round_num=server_state.round_num + 1)
+
+@tf.function
+def public_server_update(model, server_state, weights_delta):
+  """Updates `server_state` based on `weights_delta`.
+
+  Args:
+    model: A `KerasModelWrapper` or `tff.learning.Model`.
+    server_optimizer: A `ServerOptimizerBase`.
+    server_state: A `ServerState`, the state to be updated.
+    weights_delta: A nested structure of tensors holding the updates to the
+      trainable variables of the model.
+    private_lr: Learning rate to apply to the average private gradient.
+
+  Returns:
+    An updated `ServerState`.
+  """
+  weights_delta, has_non_finite_weight = (
+      tensor_utils.zero_all_if_any_non_finite(weights_delta))
+  if has_non_finite_weight > 0:
+    return server_state
+
+  # Initialize the model with the current state.
+  model_weights = _get_model_weights(model)
+  tf.nest.map_structure(lambda v, t: v.assign(t), model_weights,
+                        server_state.model)
+
+  # Create a new state based on the updated model.
+  return tff.structure.update_struct(
+      server_state,
+      model=model_weights,
+      optimizer_state=server_state.optimizer_state,
+      round_num=server_state.round_num,
+      mean_public_deltas=weights_delta)
 
 @tf.function
 def client_update(model, dataset, server_message, client_optimizer,
@@ -247,169 +412,10 @@ def client_update(model, dataset, server_message, client_optimizer,
                                              clipped_flatten_weights_delta)
   return ClientOutput(weights_delta, client_weight, loss_sum / client_weight)
 
-
-@attr.s(eq=False, frozen=True, slots=True)
-class ServerState(object):
-  """Structure for state on the server.
-
-  Fields:
-  -   `model`: A dictionary of model's trainable variables.
-  -   `optimizer_state`: Server optimizer states.
-  -   'round_num': Current round index
-  -   `dp_clip_norm`: L2 norm to clip client gradients.
-  -   `dp_noise_std`: Standard deviation of Gaussian distribution to sample noise
-        to add to gradients for differential privacy.
-  -   `mean_private_deltas`: Average deltas from private clients
-  -   `public_old_deltas`: Average deltas from public clients on old weights
-  """
-
-  model = attr.ib()
-  optimizer_state = attr.ib()
-  round_num = attr.ib()
-  dp_clip_norm = attr.ib()
-  dp_noise_std = attr.ib()
-  mean_private_deltas = attr.ib()
-  public_old_deltas = attr.ib()
-
-class CreatePrivateServerUpdateFn():
-  """Returns a tf.function for the client_update.
-
-  This "create" fn is necesessary to prevent
-  "ValueError: Creating variables on a non-first call to a function decorated
-  with tf.function" errors due to the client optimizer creating variables. This
-  is really only needed because we test the client_update function directly.
-  """
-
-  def __init__(self):
-    self.random_generator = tf.random.Generator.from_non_deterministic_state()
-
-  def _noise_fn(self, noise_std: float, model_weight_specs: Collection[tf.TensorSpec]):
-    """Returns random noise to be added for differential privacy."""
-
-    def noise_tensor(spec):
-      noise = self.random_generator.normal(spec.shape, stddev=noise_std)
-      # TODO(b/177259859): reshape because the shape of the noise could have
-      # None/? that fails TFF type check.
-      noise = tf.reshape(noise, spec.shape)
-      return noise
-
-    return tf.nest.map_structure(noise_tensor, model_weight_specs)
-
-  @tf.function
-  def __call__(self, model,
-                    optimizer,
-                    server_state,
-                    weights_delta):
-    """Updates `server_state` based on `weights_delta`, increase the round number.
-
-    Args:
-      model: A `tff.learning.Model`.
-      optimizer: A `tf.keras.optimizers.Optimizer`.
-      server_state: A `ServerState`, the state to be updated.
-      weights_delta: An update to the trainable variables of the model.
-
-    Returns:
-      An updated `ServerState`.
-    """
-    model_weights = _get_model_weights(model)
-    tf.nest.map_structure(lambda v, t: v.assign(t), model_weights,
-                          server_state.model)
-
-    model_weight_specs = tf.nest.map_structure(
-        lambda v: tf.TensorSpec(v.shape, v.dtype), model_weights.trainable)
-
-    noise_tensor = self._noise_fn(server_state.dp_noise_std, model_weight_specs)
-    # Compute new model weights.
-    weights_delta_noised = tf.nest.map_structure(lambda a, n: a + n,
-                                       weights_delta, noise_tensor)
-
-    # Create a new state based on the updated model.
-    return tff.structure.update_struct(
-        server_state,
-        model=model_weights,
-        mean_private_deltas=weights_delta_noised)
-
-@tf.function
-def public_server_update(model, server_optimizer, server_state, weights_delta, private_lr, total_rounds):
-  """Updates `server_state` based on `weights_delta`.
-
-  Args:
-    model: A `KerasModelWrapper` or `tff.learning.Model`.
-    server_optimizer: A `ServerOptimizerBase`.
-    server_state: A `ServerState`, the state to be updated.
-    weights_delta: A nested structure of tensors holding the updates to the
-      trainable variables of the model.
-    private_lr: Learning rate to apply to the average private gradient.
-
-  Returns:
-    An updated `ServerState`.
-  """
-  weights_delta, has_non_finite_weight = (
-      tensor_utils.zero_all_if_any_non_finite(weights_delta))
-  if has_non_finite_weight > 0:
-    return server_state
-
-  # Initialize the model with the current state.
-  model_weights = _get_model_weights(model)
-  tf.nest.map_structure(lambda v, t: v.assign(t), model_weights,
-                        server_state.model)
-
-  weights_delta_tensors = tf.nest.map_structure(tf.convert_to_tensor, weights_delta)
-  mu_old_tensors = tf.nest.map_structure(tf.convert_to_tensor, server_state.public_old_deltas)
-  g_tensors = tf.nest.map_structure(tf.convert_to_tensor, server_state.mean_private_deltas)
-
-  # Apply the update to the model, and return the updated state.
-  pi =  tf.constant(m.pi, dtype=tf.float32)
-  round_num = tf.cast(server_state.round_num, dtype=tf.float32)
-  total_rounds = tf.constant(total_rounds, dtype=tf.float32)
-  theta_value = tf.math.divide(tf.math.multiply(pi,round_num),tf.math.multiply(2.0, total_rounds))
-  alpha = tf.math.cos(theta_value)
-  grad = tf.nest.map_structure(lambda g,mu_new,mu_old: -1.0 * (alpha * g + (1-alpha) * mu_new), g_tensors, weights_delta_tensors, mu_old_tensors)
-  optimizer_state = server_optimizer.model_update(
-      state=server_state.optimizer_state,
-      weight=model_weights.trainable,
-      grad=grad,
-      round_idx=server_state.round_num)
-
-  # Create a new state based on the updated model.
-  return tff.structure.update_struct(
-      server_state,
-      model=model_weights,
-      optimizer_state=optimizer_state,
-      round_num=server_state.round_num + 1)
-
-@tf.function
-def public_old_server_update(model, server_optimizer, server_state, weights_delta):
-  """Updates `server_state` based on `weights_delta`.
-
-  Args:
-    model: A `KerasModelWrapper` or `tff.learning.Model`.
-    server_optimizer: A `ServerOptimizerBase`.
-    server_state: A `ServerState`, the state to be updated.
-    weights_delta: A nested structure of tensors holding the updates to the
-      trainable variables of the model.
-
-  Returns:
-    An updated `ServerState`.
-  """
-  weights_delta, has_non_finite_weight = (
-      tensor_utils.zero_all_if_any_non_finite(weights_delta))
-  if has_non_finite_weight > 0:
-    return server_state
-
-  # Create a new state based on the updated model.
-  return tff.structure.update_struct(
-      server_state,
-      model=server_state.model,
-      public_old_deltas=weights_delta)
-
-
 def build_averaging_process(
     model_fn,
     dp_clip_norm=1.0,
-    dp_noise_std=0.0,
     update_type='private',
-    private_lr=1.0,
     server_optimizer_fn=DEFAULT_SERVER_OPTIMIZER_FN,
     client_optimizer_fn=DEFAULT_CLIENT_OPTIMIZER_FN,
     total_rounds = 1600,
@@ -427,7 +433,6 @@ def build_averaging_process(
     server_optimizer_fn: .
     client_optimizer_fn: A no-arg function that returns a
       `tf.keras.optimizers.Optimizer` for client update.
-    alpha: Parameter for convex combination gradient
     use_simulation_loop: Controls the reduce loop function for client dataset.
       Set this flag to True for performant GPU simulations.
 
@@ -442,16 +447,13 @@ def build_averaging_process(
     model = model_fn()
     model_weights = _get_model_weights(model)
     optimizer = server_optimizer_fn(model_weights.trainable)
-    mean_private_deltas = tf.nest.map_structure(lambda x: tf.Variable(tf.zeros_like(x)), model_weights.trainable)
-    public_old_deltas = tf.nest.map_structure(lambda x: tf.Variable(tf.zeros_like(x)), model_weights.trainable)
+    mean_public_deltas = tf.nest.map_structure(lambda x: tf.Variable(tf.zeros_like(x)), model_weights.trainable)
     return ServerState(
         model=model_weights,
         optimizer_state=optimizer.init_state(),
         round_num=0,
         dp_clip_norm=dp_clip_norm,
-        dp_noise_std=dp_noise_std,
-        mean_private_deltas=mean_private_deltas,
-        public_old_deltas=public_old_deltas)
+        mean_public_deltas=mean_public_deltas)
 
   server_state_type = server_init_tf.type_signature.result
 
@@ -462,22 +464,14 @@ def build_averaging_process(
     model = model_fn()
     model_weights = _get_model_weights(model)
     optimizer = server_optimizer_fn(model_weights.trainable)
-    server_update = CreatePrivateServerUpdateFn()
-    return server_update(model, optimizer, server_state, model_delta)
+    return private_server_update(model, optimizer, server_state, model_delta, total_rounds)
 
   @tff.tf_computation(server_state_type, model_weights_type.trainable)
   def public_server_update_fn(server_state, model_delta):
     model = model_fn()
     model_weights = _get_model_weights(model)
     optimizer = server_optimizer_fn(model_weights.trainable)
-    return public_server_update(model, optimizer, server_state, model_delta, private_lr, total_rounds)
-
-  @tff.tf_computation(server_state_type, model_weights_type.trainable)
-  def public_old_server_update_fn(server_state, model_delta):
-    model = model_fn()
-    model_weights = _get_model_weights(model)
-    optimizer = server_optimizer_fn(model_weights.trainable)
-    return public_old_server_update(model, optimizer, server_state, model_delta)
+    return public_server_update(model, server_state, model_delta)
 
   @tff.tf_computation(server_state_type)
   def server_message_fn(server_state):
@@ -552,34 +546,6 @@ def build_averaging_process(
 
     return server_state, round_loss_metric
 
-  @tff.federated_computation(federated_server_state_type,
-                             federated_dataset_type)
-  def run_one_round_public_old(server_state, federated_dataset):
-    """Orchestration logic for one round of computation.
-
-    Args:
-      server_state: A `ServerState`.
-      federated_dataset: A federated `tf.data.Dataset` with placement
-        `tff.CLIENTS`.
-
-    Returns:
-      A tuple of updated `ServerState` and `tf.Tensor` of average loss.
-    """
-    server_message = tff.federated_map(server_message_fn, server_state)
-    server_message_at_client = tff.federated_broadcast(server_message)
-
-    client_outputs = tff.federated_map(
-        client_update_fn, (federated_dataset, server_message_at_client))
-
-    # Model deltas are equally weighted in DP.
-    round_model_delta = tff.federated_mean(client_outputs.weights_delta)
-
-    server_state = tff.federated_map(public_old_server_update_fn,
-                                     (server_state, round_model_delta))
-    round_loss_metric = tff.federated_mean(client_outputs.model_output)
-
-    return server_state, round_loss_metric
-
   @tff.federated_computation
   def server_init_tff():
     """Orchestration logic for server model initialization."""
@@ -591,6 +557,3 @@ def build_averaging_process(
   elif update_type == 'public':
     return tff.templates.IterativeProcess(
         initialize_fn=server_init_tff, next_fn=run_one_round_public)
-  elif update_type == 'public_old':
-    return tff.templates.IterativeProcess(
-        initialize_fn=server_init_tff, next_fn=run_one_round_public_old)
