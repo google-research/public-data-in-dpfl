@@ -110,7 +110,7 @@ def run(
   logging.info('Starting iterative_process training loop...')
   initial_state = iterative_process.initialize()
 
-  checkpoint_mngr, metrics_mngr, tensorboard_mngr, _ = training_loop._setup_outputs(
+  checkpoint_mngr, metrics_mngr, tensorboard_mngr = training_loop._setup_outputs(
       root_output_dir, experiment_name, hparam_dict)
 
   logging.info('Asking checkpoint manager to load checkpoint.')
@@ -130,6 +130,14 @@ def run(
   metrics_mngr.clear_metrics(round_num)
 
   loop_start_time = time.time()
+  # Compute validation metrics on initial checkpoint
+  metrics = {}
+  evaluate_start_time = time.time()
+  validation_metrics = validation_fn(state.model)
+  validation_metrics['evaluate_secs'] = time.time() - evaluate_start_time
+  metrics['eval'] = validation_metrics
+  training_loop._write_metrics(metrics_mngr, tensorboard_mngr, metrics,
+                                     round_num)
   while epoch < total_epochs and round_num < total_rounds:
     data_prep_start_time = time.time()
     prev_epoch = epoch
