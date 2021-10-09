@@ -304,9 +304,8 @@ def private_server_update(model, server_optimizer, server_state, weights_delta, 
   round_num = tf.cast(server_state.round_num, dtype=tf.float32)
   total_rounds = tf.constant(total_rounds, dtype=tf.float32)
   theta_value = tf.math.divide(tf.math.multiply(pi,round_num),tf.math.multiply(2.0, total_rounds))
-  alpha = 1.0
+  alpha = tf.math.cos(theta_value)
   grad = tf.nest.map_structure(lambda g,mu_new: -1.0 * (alpha * g + (1.0-alpha) * mu_new), weights_delta_tensors, public_delta_tensors)
-  # grad = tf.nest.map_structure(lambda x: -1.0 * x, weights_delta)
 
   # Apply the update to the model, and return the updated state.
   optimizer_state = server_optimizer.model_update(

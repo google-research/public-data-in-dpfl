@@ -783,8 +783,10 @@ def _build_mirror_descent_model_and_process(input_spec, test_metrics, server_opt
   if update_type == 'private':
     noise_std = FLAGS.clip_norm * FLAGS.noise_multiplier / float(
         FLAGS.private_round_size)
+    clip_norm = FLAGS.clip_norm
   elif update_type == 'public':
     noise_std = 0.0
+    clip_norm = 10000000
   server_optimizer_fn = functools.partial(
       _server_optimizer_fn,
       name=server_optimizer,
@@ -811,7 +813,7 @@ def _build_mirror_descent_model_and_process(input_spec, test_metrics, server_opt
         server_optimizer_fn=server_optimizer_fn,
         client_optimizer_fn=client_optimizer_fn,
         update_type=update_type,
-        dp_clip_norm=FLAGS.clip_norm,
+        dp_clip_norm=clip_norm,
         total_rounds=FLAGS.total_rounds) 
 
   model = tff_model_fn()
@@ -1343,7 +1345,7 @@ def train_and_eval():
     training_set_client_ids = train_set.client_ids[:client_ids_size]
 
   elif FLAGS.experiment_type == 'warmstart':
-    # Evaluate on StackOverflow
+    #Evaluate on StackOverflow
     train_dataset_computation, train_set, validation_set, test_set = (
         _preprocess_data('stackoverflow_private', FLAGS.vocab_size,
                          FLAGS.num_oov_buckets, FLAGS.sequence_length,
@@ -1365,12 +1367,16 @@ def train_and_eval():
 
     if FLAGS.total_epochs is None:
 
-     def client_dataset_ids_fn(round_num: int, epoch: int):
-       return _sample_client_ids(FLAGS.clients_per_round, train_set, round_num,
-                                epoch)
+    #  def client_dataset_ids_fn(round_num: int, epoch: int):
+    #    return _sample_client_ids(FLAGS.clients_per_round, train_set, round_num,
+    #                             epoch)
 
-     logging.info('Sample clients for max %d rounds', FLAGS.total_rounds)
-     total_epochs = 0
+      def client_dataset_ids_fn(round_num: int, epoch: int):
+        logging.info("Sampling from subset of public")
+        return _sample_public_client_ids(FLAGS.clients_per_round, training_set_client_ids, round_num, epoch)
+
+      logging.info('Sample clients for max %d rounds', FLAGS.total_rounds)
+      total_epochs = 0
 
     else:
      client_shuffer = training_loop.ClientIDShuffler(FLAGS.clients_per_round,
@@ -1521,8 +1527,9 @@ def train_and_eval_mirror_descent():
 
       def client_dataset_ids_fn_public(round_num: int, epoch: int):
         if FLAGS.experiment_type == 'mirror_descent_SO' or FLAGS.experiment_type == 'mirror_descent_warmstart_SO' or FLAGS.experiment_type == 'mirror_descent_convex_SO' or FLAGS.experiment_type == 'mirror_descent_convex_warmstart_SO':
+          sampled_ids = _sample_public_client_ids(FLAGS.public_round_size, training_set_client_ids, round_num, epoch)
           logging.info("Sampling from subset of public")
-          return _sample_public_client_ids(FLAGS.public_round_size, training_set_client_ids, round_num, epoch)
+          return sampled_ids
         else:
           return _sample_client_ids(FLAGS.public_round_size, train_set_public,
                                   round_num, epoch)
@@ -1568,7 +1575,7 @@ def train_and_eval_mirror_descent():
           restart_optimizer=FLAGS.restart_optimizer,
           server_state_epoch_update_fn=server_state_update_fn)
   elif 'convex' in FLAGS.experiment_type and not 'warmstart' in FLAGS.experiment_type:
-    mirror_descent_convex_loop_v2.run(
+    mirror_descent_convex_loop_v3.run(
           iterative_process_private,
           client_dataset_ids_fn_private,
           iterative_process_public,

@@ -196,12 +196,12 @@ def run(
         'prepare_datasets_secs': time.time() - data_prep_start_time
     }
     training_start_time = time.time()
-    # Compute private gradient
-    # logging.info("Compute public deltas")
-    # federated_train_data, epoch = client_datasets_fn_public(round_num, epoch)
-    # state, _ = iterative_process_public.next(state, federated_train_data)
-    # logging.info('Public Update {:2d}.'.format(
-    #       round_num))
+    #Compute private gradient
+    logging.info("Compute public deltas")
+    federated_train_data, epoch = client_datasets_fn_public(round_num, epoch)
+    state, _ = iterative_process_public.next(state, federated_train_data)
+    logging.info('Public Update {:2d}.'.format(
+          round_num))
 
     logging.info("Compute private deltas and convex combined updated")
     federated_train_data, epoch = client_datasets_fn_private(round_num, epoch)
