@@ -355,7 +355,7 @@ def public_server_update(model, server_state, weights_delta):
       mean_public_deltas=weights_delta)
 
 @tf.function
-def client_update(model, dataset, server_message, client_optimizer,
+def private_client_update(model, dataset, server_message, client_optimizer,
                   use_simulation_loop):
   """Performans client local training of `model` on `dataset`.
 
@@ -409,6 +409,56 @@ def client_update(model, dataset, server_message, client_optimizer,
         flatten_weights_delta, clip_norm)
     weights_delta = tf.nest.pack_sequence_as(weights_delta,
                                              clipped_flatten_weights_delta)
+  return ClientOutput(weights_delta, client_weight, loss_sum / client_weight)
+
+@tf.function
+def public_client_update(model, dataset, server_message, client_optimizer,
+                  use_simulation_loop):
+  """Performans client local training of `model` on `dataset`.
+
+  Args:
+    model: A `tff.learning.Model`.
+    dataset: A 'tf.data.Dataset'.
+    server_message: A `BroadcastMessage` from server.
+    client_optimizer: A `tf.keras.optimizers.Optimizer`.
+    use_simulation_loop: Controls the reduce loop function for client dataset.
+      Set this flag to True for performant GPU simulations.
+
+  Returns:
+    A 'ClientOutput`.
+  """
+  model_weights = _get_model_weights(model)
+  initial_weights = server_message.model_weights
+  tf.nest.map_structure(lambda v, t: v.assign(t), model_weights,
+                        initial_weights)
+
+  def reduce_fn(state, batch):
+    """Train model on local client batch."""
+    num_examples, loss_sum = state
+    with tf.GradientTape() as tape:
+      outputs = model.forward_pass(batch)
+
+    grads = tape.gradient(outputs.loss, model_weights.trainable)
+    client_optimizer.apply_gradients(zip(grads, model_weights.trainable))
+    if hasattr(outputs, 'num_examples'):
+      batch_size = tf.cast(outputs.num_examples, dtype=tf.int32)
+    else:
+      batch_x, _ = _unpack_data_label(batch)
+      batch_size = tf.shape(batch_x)[0]
+    num_examples += batch_size
+    loss_sum += outputs.loss * tf.cast(batch_size, tf.float32)
+    return num_examples, loss_sum
+
+  num_examples = tf.constant(0, dtype=tf.int32)
+  loss_sum = tf.constant(0, dtype=tf.float32)
+  dataset_reduce_fn = _build_dataset_reduce_fn(use_simulation_loop)
+  num_examples, loss_sum = dataset_reduce_fn(
+      reduce_fn, dataset, initial_state_fn=lambda: (num_examples, loss_sum))
+  weights_delta = tf.nest.map_structure(lambda a, b: a - b,
+                                        model_weights.trainable,
+                                        initial_weights.trainable)
+  client_weight = tf.cast(num_examples, tf.float32)
+
   return ClientOutput(weights_delta, client_weight, loss_sum / client_weight)
 
 def build_averaging_process(
@@ -480,10 +530,20 @@ def build_averaging_process(
   tf_dataset_type = tff.SequenceType(example_model.input_spec)
 
   @tff.tf_computation(tf_dataset_type, server_message_type)
-  def client_update_fn(tf_dataset, server_message):
+  def private_client_update_fn(tf_dataset, server_message):
     model = model_fn()
     client_optimizer = client_optimizer_fn()
-    return client_update(model, tf_dataset, server_message, client_optimizer,
+    return private_client_update(model, tf_dataset, server_message, client_optimizer,
+                         use_simulation_loop)
+
+  federated_server_state_type = tff.type_at_server(server_state_type)
+  federated_dataset_type = tff.type_at_clients(tf_dataset_type)
+
+  @tff.tf_computation(tf_dataset_type, server_message_type)
+  def public_client_update_fn(tf_dataset, server_message):
+    model = model_fn()
+    client_optimizer = client_optimizer_fn()
+    return public_client_update(model, tf_dataset, server_message, client_optimizer,
                          use_simulation_loop)
 
   federated_server_state_type = tff.type_at_server(server_state_type)
@@ -506,7 +566,7 @@ def build_averaging_process(
     server_message_at_client = tff.federated_broadcast(server_message)
 
     client_outputs = tff.federated_map(
-        client_update_fn, (federated_dataset, server_message_at_client))
+        private_client_update_fn, (federated_dataset, server_message_at_client))
 
     # Model deltas are equally weighted in DP.
     round_model_delta = tff.federated_mean(client_outputs.weights_delta)
@@ -534,7 +594,7 @@ def build_averaging_process(
     server_message_at_client = tff.federated_broadcast(server_message)
 
     client_outputs = tff.federated_map(
-        client_update_fn, (federated_dataset, server_message_at_client))
+        public_client_update_fn, (federated_dataset, server_message_at_client))
 
     # Model deltas are equally weighted in DP.
     round_model_delta = tff.federated_mean(client_outputs.weights_delta)
